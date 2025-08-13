@@ -232,7 +232,7 @@ def fetch_all_openrouter_models():
             "Content-Type": "application/json"
         }
         
-        st.info("🔄 Loading all OpenRouter models... (483+ models)")
+    
         response = requests.get("https://openrouter.ai/api/v1/models", headers=headers, timeout=15)
         
         if response.status_code == 200:
@@ -777,7 +777,7 @@ with st.sidebar:
     col1, col2 = st.columns([1, 3])
     with col1:
         # Display CHUNKS logo
-        st.image("logo.png", width=60)
+        st.image("logo.png", width=100)
     with col2:
         st.markdown("### 🚀 CHUNKS AI CHATBOT v2.0")
     
