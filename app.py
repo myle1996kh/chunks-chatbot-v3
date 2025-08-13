@@ -61,7 +61,7 @@ def add_local_storage_js():
     
     // Clear all saved API keys
     function clearAllAPIKeys() {
-        const keys = ['OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'NOVITA_API_KEY', 'DEEPGRAM_API_KEY', 'HF_TOKEN'];
+        const keys = ['OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'NOVITA_API_KEY', 'DEEPGRAM_API_KEY'];
         keys.forEach(key => localStorage.removeItem('chunks_' + key));
     }
     
@@ -105,7 +105,6 @@ OPENROUTER_API_KEY = get_api_key_multi_source("OPENROUTER_API_KEY")
 FIREWORKS_API_KEY = get_api_key_multi_source("FIREWORKS_API_KEY")
 NOVITA_API_KEY = get_api_key_multi_source("NOVITA_API_KEY")
 DEEPGRAM_API_KEY = get_api_key_multi_source("DEEPGRAM_API_KEY")
-HF_TOKEN = get_api_key_multi_source("HF_TOKEN")
 
 # ===================================================================
 # STATIC MODEL CATALOGS (Fireworks & Novita)
@@ -657,6 +656,14 @@ class SessionManager:
         if session_id in st.session_state.chat_sessions:
             st.session_state.chat_sessions[session_id]["system_prompt"] = prompt
             self.save_sessions()
+    
+    def rename_session(self, session_id: str, new_name: str) -> bool:
+        """Rename a session"""
+        if session_id in st.session_state.chat_sessions and new_name.strip():
+            st.session_state.chat_sessions[session_id]["name"] = new_name.strip()
+            self.save_sessions()
+            return True
+        return False
 
 # Initialize components
 deepgram_voice = DeepgramVoice()
@@ -806,7 +813,7 @@ with st.sidebar:
         st.markdown("""
         <script>
         // Load saved keys into Streamlit
-        const keyNames = ['OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'NOVITA_API_KEY', 'DEEPGRAM_API_KEY', 'HF_TOKEN'];
+        const keyNames = ['OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'NOVITA_API_KEY', 'DEEPGRAM_API_KEY'];
         keyNames.forEach(keyName => {
             const savedKey = loadAPIKey(keyName);
             if (savedKey) {
@@ -914,7 +921,7 @@ with st.sidebar:
         if st.button("🗑️ Clear All Saved Keys", key="clear_all_keys"):
             # Clear session state keys
             keys_to_clear = ["user_input_OPENROUTER_API_KEY", "user_input_FIREWORKS_API_KEY", 
-                           "user_input_NOVITA_API_KEY", "user_input_DEEPGRAM_API_KEY", "user_input_HF_TOKEN"]
+                           "user_input_NOVITA_API_KEY", "user_input_DEEPGRAM_API_KEY"]
             for key in keys_to_clear:
                 if key in st.session_state:
                     del st.session_state[key]
@@ -933,8 +940,7 @@ with st.sidebar:
     FIREWORKS_API_KEY = get_api_key_multi_source("FIREWORKS_API_KEY")
     NOVITA_API_KEY = get_api_key_multi_source("NOVITA_API_KEY")
     DEEPGRAM_API_KEY = get_api_key_multi_source("DEEPGRAM_API_KEY")
-    HF_TOKEN = get_api_key_multi_source("HF_TOKEN")
-    
+        
     # Initialize session state
     if "current_session_id" not in st.session_state:
         if not st.session_state.get("chat_sessions", {}):
@@ -957,6 +963,26 @@ with st.sidebar:
                 st.session_state.current_session_id = selected_session
                 st.rerun()
         
+        # Session Rename Feature
+        if session_options:
+            st.markdown("**✏️ Rename Session:**")
+            current_session_name = st.session_state.chat_sessions[st.session_state.current_session_id]["name"]
+            new_name = st.text_input("Session name", value=current_session_name, key="rename_session_input")
+            
+            col_rename1, col_rename2 = st.columns(2)
+            with col_rename1:
+                if st.button("💾 Save Name", key="save_session_name"):
+                    if new_name.strip() and new_name != current_session_name:
+                        if session_manager.rename_session(st.session_state.current_session_id, new_name):
+                            st.success("✅ Session renamed!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to rename session")
+            with col_rename2:
+                if st.button("↩️ Reset", key="reset_session_name"):
+                    st.rerun()
+        
+        st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("➕ New Session"):
