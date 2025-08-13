@@ -1057,7 +1057,9 @@ with st.sidebar:
                     # Inline Model Testing
                     col1, col2 = st.columns([2, 1])
                     with col1:
-                        if st.button("🧪 Test Model", key="test_openrouter", help="Send 'Hi' to test if model works"):
+                        # Create unique key based on provider and model
+                        test_key = f"test_{provider_choice}_{model_choice.replace('/', '_').replace('-', '_').replace('.', '_')}"
+                        if st.button("🧪 Test Model", key=test_key, help="Send 'Hi' to test if model works"):
                             with st.spinner("🔍 Testing model..."):
                                 test_response = multi_ai.chat_completion(
                                     messages=[{"role": "user", "content": "Hi"}],
@@ -1091,7 +1093,9 @@ with st.sidebar:
                     # Inline Model Testing
                     col1, col2 = st.columns([2, 1])
                     with col1:
-                        if st.button("🧪 Test Model", key="test_fireworks_novita", help="Send 'Hi' to test if model works"):
+                        # Create unique key based on provider and model  
+                        test_key = f"test_{provider_choice}_{model_choice.replace('/', '_').replace('-', '_').replace('.', '_')}"
+                        if st.button("🧪 Test Model", key=test_key, help="Send 'Hi' to test if model works"):
                             with st.spinner("🔍 Testing model..."):
                                 test_response = multi_ai.chat_completion(
                                     messages=[{"role": "user", "content": "Hi"}],
