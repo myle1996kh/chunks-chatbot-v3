@@ -1053,6 +1053,23 @@ with st.sidebar:
                         <p><strong>Price:</strong> {'FREE' if model_info.get('is_free') else f"${model_info.get('prompt_price', 0):.6f}/${model_info.get('completion_price', 0):.6f}"}</p>
                     </div>
                     """, unsafe_allow_html=True)
+                    
+                    # Inline Model Testing
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        if st.button("🧪 Test Model", key="test_openrouter", help="Send 'Hi' to test if model works"):
+                            with st.spinner("🔍 Testing model..."):
+                                test_response = multi_ai.chat_completion(
+                                    messages=[{"role": "user", "content": "Hi"}],
+                                    provider=provider_choice, model=model_choice,
+                                    temperature=0.7, max_tokens=3
+                                )
+                                if test_response.startswith("⚠️") or test_response.startswith("❌"):
+                                    st.error(f"❌ **Test Failed:** {test_response[:100]}...")
+                                else:
+                                    st.success(f"✅ **Works!** Response: {test_response}")
+                    with col2:
+                        pass  # Reserved for status indicator
             else:
                 st.warning("No models match your criteria. Try adjusting filters.")
                 model_choice = None
@@ -1070,6 +1087,23 @@ with st.sidebar:
                 if model_choice in available_models:
                     model_info = available_models[model_choice]
                     st.info(f"**{model_info['name']}**\\n\\n**Parameters:** {model_info['parameters']}\\n\\n**Description:** {model_info['description']}")
+                    
+                    # Inline Model Testing
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        if st.button("🧪 Test Model", key="test_fireworks_novita", help="Send 'Hi' to test if model works"):
+                            with st.spinner("🔍 Testing model..."):
+                                test_response = multi_ai.chat_completion(
+                                    messages=[{"role": "user", "content": "Hi"}],
+                                    provider=provider_choice, model=model_choice,
+                                    temperature=0.7, max_tokens=3
+                                )
+                                if test_response.startswith("⚠️") or test_response.startswith("❌"):
+                                    st.error(f"❌ **Test Failed:** {test_response[:100]}...")
+                                else:
+                                    st.success(f"✅ **Works!** Response: {test_response}")
+                    with col2:
+                        pass  # Reserved for status indicator
             else:
                 st.error("No models available for selected provider")
                 model_choice = None
@@ -1079,22 +1113,6 @@ with st.sidebar:
         temperature = st.slider("Temperature", 0.0, 2.0, 0.7, 0.1)
         max_tokens = st.slider("Max Tokens", 1, 4096, 512, 1)
     
-    # Model Testing
-    with st.expander("🧪 Model Testing", expanded=False):
-        if st.button("🔍 Test Selected Model (3 tokens)"):
-            if provider_choice and model_choice:
-                with st.spinner("Testing model with 3 tokens..."):
-                    test_response = multi_ai.chat_completion(
-                        messages=[{"role": "user", "content": "Hi"}],
-                        provider=provider_choice, model=model_choice,
-                        temperature=0.7, max_tokens=3
-                    )
-                    if test_response.startswith("⚠️") or test_response.startswith("❌"):
-                        st.error(f"❌ **Model Failed Test:**\n{test_response}")
-                    else:
-                        st.success(f"✅ **Model Works!** Response: {test_response}")
-            else:
-                st.warning("Please select a provider and model first")
     
     # Voice Settings
     voice_enabled = False
