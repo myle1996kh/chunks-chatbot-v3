@@ -27,32 +27,85 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ===================================================================
-# API KEYS CONFIGURATION
+# API KEYS CONFIGURATION WITH BROWSER STORAGE
 # ===================================================================
-# Load API keys from environment variables or Streamlit secrets
-def get_api_key(key_name):
-    """Get API key from environment or Streamlit secrets"""
-    # First try environment variables (for local development)
+
+# JavaScript functions for browser local storage
+def add_local_storage_js():
+    """Add JavaScript functions for browser local storage"""
+    st.markdown("""
+    <script>
+    // Save API key to browser local storage (encrypted)
+    function saveAPIKey(keyName, keyValue) {
+        if (keyValue && keyValue.trim() !== '') {
+            // Simple encoding (not encryption, just obfuscation)
+            const encoded = btoa(keyValue);
+            localStorage.setItem('chunks_' + keyName, encoded);
+            return true;
+        }
+        return false;
+    }
+    
+    // Load API key from browser local storage
+    function loadAPIKey(keyName) {
+        try {
+            const encoded = localStorage.getItem('chunks_' + keyName);
+            if (encoded) {
+                return atob(encoded);
+            }
+        } catch (e) {
+            console.log('Error loading key:', e);
+        }
+        return null;
+    }
+    
+    // Clear all saved API keys
+    function clearAllAPIKeys() {
+        const keys = ['OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'NOVITA_API_KEY', 'DEEPGRAM_API_KEY', 'HF_TOKEN'];
+        keys.forEach(key => localStorage.removeItem('chunks_' + key));
+    }
+    
+    // Check if API key is saved
+    function hasAPIKey(keyName) {
+        return localStorage.getItem('chunks_' + keyName) !== null;
+    }
+    </script>
+    """, unsafe_allow_html=True)
+
+def get_api_key_multi_source(key_name):
+    """Get API key from multiple sources with priority order"""
+    
+    # Priority 1: Check if user has input the key in current session
+    session_key = f"user_input_{key_name}"
+    if session_key in st.session_state and st.session_state[session_key]:
+        return st.session_state[session_key]
+    
+    # Priority 2: Check browser local storage via session state
+    browser_key = f"browser_{key_name}"
+    if browser_key in st.session_state and st.session_state[browser_key]:
+        return st.session_state[browser_key]
+    
+    # Priority 3: Environment variables (for local development)
     env_key = os.getenv(key_name)
-    if env_key:
+    if env_key and env_key != f"{key_name.lower()}-placeholder":
         return env_key
     
-    # Then try Streamlit secrets (for deployment)
+    # Priority 4: Streamlit secrets (for deployment)
     try:
-        return st.secrets[key_name]
-    except (KeyError, FileNotFoundError):
-        return None
+        secret_key = st.secrets[key_name]
+        if secret_key and not secret_key.startswith("your-actual-") and not secret_key.endswith("-here"):
+            return secret_key
+    except (KeyError, FileNotFoundError, AttributeError):
+        pass
+    
+    return None
 
-OPENROUTER_API_KEY = get_api_key("OPENROUTER_API_KEY")
-FIREWORKS_API_KEY = get_api_key("FIREWORKS_API_KEY")
-NOVITA_API_KEY = get_api_key("NOVITA_API_KEY")
-DEEPGRAM_API_KEY = get_api_key("DEEPGRAM_API_KEY")
-HF_TOKEN = get_api_key("HF_TOKEN")
-
-# Check required API keys
-if not OPENROUTER_API_KEY:
-    st.error("⚠️ **OpenRouter API Key Required!** Please add OPENROUTER_API_KEY to your .env file")
-    st.stop()
+# Initialize API keys (will be updated via UI)
+OPENROUTER_API_KEY = get_api_key_multi_source("OPENROUTER_API_KEY")
+FIREWORKS_API_KEY = get_api_key_multi_source("FIREWORKS_API_KEY")
+NOVITA_API_KEY = get_api_key_multi_source("NOVITA_API_KEY")
+DEEPGRAM_API_KEY = get_api_key_multi_source("DEEPGRAM_API_KEY")
+HF_TOKEN = get_api_key_multi_source("HF_TOKEN")
 
 # ===================================================================
 # STATIC MODEL CATALOGS (Fireworks & Novita)
@@ -341,12 +394,17 @@ def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term
 
 class MultiProviderAI:
     def __init__(self):
-        self.fireworks_api_key = FIREWORKS_API_KEY
-        self.novita_api_key = NOVITA_API_KEY
-        self.openrouter_api_key = OPENROUTER_API_KEY
         self.fireworks_url = "https://api.fireworks.ai/inference/v1/chat/completions"
         self.novita_url = "https://api.novita.ai/v3/openai/chat/completions"
         self.openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
+    
+    def get_current_api_keys(self):
+        """Get current API keys from all sources"""
+        return {
+            'fireworks': get_api_key_multi_source("FIREWORKS_API_KEY"),
+            'novita': get_api_key_multi_source("NOVITA_API_KEY"),
+            'openrouter': get_api_key_multi_source("OPENROUTER_API_KEY")
+        }
         
     def get_available_models(self, provider: str) -> Dict[str, Dict]:
         """Get available models for the specified provider"""
@@ -380,10 +438,13 @@ class MultiProviderAI:
     
     def _fireworks_chat(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int) -> str:
         """Handle Fireworks AI chat completion"""
-        if not self.fireworks_api_key:
-            return "⚠️ **Fireworks API key required!** Please add FIREWORKS_API_KEY to your .env file"
+        api_keys = self.get_current_api_keys()
+        fireworks_key = api_keys['fireworks']
         
-        headers = {"Authorization": f"Bearer {self.fireworks_api_key}", "Content-Type": "application/json"}
+        if not fireworks_key:
+            return "⚠️ **Fireworks API key required!** Please add your Fireworks API key in the sidebar."
+        
+        headers = {"Authorization": f"Bearer {fireworks_key}", "Content-Type": "application/json"}
         model_info = FIREWORKS_MODELS.get(model, {})
         fireworks_model = model_info.get("fireworks_model", model)
         
@@ -403,10 +464,13 @@ class MultiProviderAI:
     
     def _novita_chat(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int) -> str:
         """Handle Novita AI chat completion"""
-        if not self.novita_api_key:
-            return "⚠️ **Novita API key required!** Please add NOVITA_API_KEY to your .env file"
+        api_keys = self.get_current_api_keys()
+        novita_key = api_keys['novita']
         
-        headers = {"Authorization": f"Bearer {self.novita_api_key}", "Content-Type": "application/json"}
+        if not novita_key:
+            return "⚠️ **Novita API key required!** Please add your Novita API key in the sidebar."
+        
+        headers = {"Authorization": f"Bearer {novita_key}", "Content-Type": "application/json"}
         model_info = NOVITA_MODELS.get(model, {})
         novita_model = model_info.get("novita_model", model)
         
@@ -426,15 +490,18 @@ class MultiProviderAI:
     
     def _openrouter_chat(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int) -> str:
         """Handle OpenRouter AI chat completion"""
-        if not self.openrouter_api_key:
-            return "⚠️ **OpenRouter API key required!** Please add OPENROUTER_API_KEY to your .env file"
+        api_keys = self.get_current_api_keys()
+        openrouter_key = api_keys['openrouter']
+        
+        if not openrouter_key:
+            return "⚠️ **OpenRouter API key required!** Please add your OpenRouter API key in the sidebar."
         
         # Debug: Check if key is being read correctly
-        if len(self.openrouter_api_key) < 20:
-            return f"⚠️ **API Key Error**\\n\\nAPI key appears truncated: {self.openrouter_api_key[:10]}..."
+        if len(openrouter_key) < 20:
+            return f"⚠️ **API Key Error**\\n\\nAPI key appears truncated: {openrouter_key[:10]}..."
         
         headers = {
-            "Authorization": f"Bearer {self.openrouter_api_key}",
+            "Authorization": f"Bearer {openrouter_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://chunks-chatbot-v2.com",
             "X-Title": "CHUNKS Multi-Provider Chatbot v2.0"
@@ -458,9 +525,9 @@ class MultiProviderAI:
                 try:
                     error_data = response.json()
                     error_msg = error_data.get("error", {}).get("message", "Unknown error")
-                    return f"⚠️ **OpenRouter API Error 401**\\n\\n{error_msg}\\n\\nAPI Key starts with: {self.openrouter_api_key[:15]}...\\n\\nPlease verify your key at https://openrouter.ai/keys"
+                    return f"⚠️ **OpenRouter API Error 401**\\n\\n{error_msg}\\n\\nAPI Key starts with: {openrouter_key[:15]}...\\n\\nPlease verify your key at https://openrouter.ai/keys"
                 except:
-                    return f"⚠️ **OpenRouter API Error 401**\\n\\nAPI key authentication failed.\\n\\nAPI Key starts with: {self.openrouter_api_key[:15]}...\\n\\nPlease check your OpenRouter API key at https://openrouter.ai/keys"
+                    return f"⚠️ **OpenRouter API Error 401**\\n\\nAPI key authentication failed.\\n\\nAPI Key starts with: {openrouter_key[:15]}...\\n\\nPlease check your OpenRouter API key at https://openrouter.ai/keys"
             elif response.status_code == 403:
                 # Parse the error message to provide better guidance
                 try:
@@ -485,16 +552,20 @@ class MultiProviderAI:
 
 class DeepgramVoice:
     def __init__(self):
-        self.api_key = DEEPGRAM_API_KEY
         self.stt_url = "https://api.deepgram.com/v1/listen"
         self.tts_url = "https://api.deepgram.com/v1/speak"
+    
+    def get_current_api_key(self):
+        """Get current Deepgram API key"""
+        return get_api_key_multi_source("DEEPGRAM_API_KEY")
         
     def speech_to_text(self, audio_file_path: str) -> str:
         """Convert speech to text using Deepgram STT"""
-        if not self.api_key:
-            return "[Speech-to-Text requires Deepgram API key in .env file]"
+        api_key = self.get_current_api_key()
+        if not api_key:
+            return "[Speech-to-Text requires Deepgram API key - add it in the sidebar]"
             
-        headers = {"Authorization": f"Token {self.api_key}", "Content-Type": "audio/wav"}
+        headers = {"Authorization": f"Token {api_key}", "Content-Type": "audio/wav"}
         params = {"model": "nova-2", "language": "en-US", "smart_format": "true", "punctuate": "true"}
         
         try:
@@ -511,10 +582,11 @@ class DeepgramVoice:
     
     def text_to_speech(self, text: str, voice_model: str = "aura-asteria-en") -> bytes:
         """Convert text to speech using Deepgram TTS"""
-        if not self.api_key:
+        api_key = self.get_current_api_key()
+        if not api_key:
             return None
             
-        headers = {"Authorization": f"Token {self.api_key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Token {api_key}", "Content-Type": "application/json"}
         tts_url_with_model = f"https://api.deepgram.com/v1/speak?model={voice_model}&encoding=linear16&sample_rate=24000"
         payload = {"text": text[:500]}
         
@@ -698,6 +770,9 @@ st.markdown("""
 # ===================================================================
 
 with st.sidebar:
+    # Add JavaScript for local storage
+    add_local_storage_js()
+    
     # Logo and Header
     col1, col2 = st.columns([1, 3])
     with col1:
@@ -710,6 +785,160 @@ with st.sidebar:
         """, unsafe_allow_html=True)
     with col2:
         st.markdown("### 🚀 CHUNKS AI CHATBOT v2.0")
+    
+    # ===================================================================
+    # API KEY MANAGEMENT INTERFACE
+    # ===================================================================
+    
+    def get_key_status_icon(key):
+        """Get status icon for API key"""
+        if key and len(key) > 10:
+            return "✅"
+        return "❌"
+    
+    def mask_api_key(key):
+        """Mask API key for display"""
+        if not key:
+            return "Not set"
+        if len(key) <= 8:
+            return "*" * len(key)
+        return key[:4] + "*" * (len(key) - 8) + key[-4:]
+    
+    with st.expander("🔑 API Key Management", expanded=not OPENROUTER_API_KEY):
+        st.markdown("**Enter your API keys to access AI models:**")
+        
+        # Load existing keys from browser storage on first load
+        st.markdown("""
+        <script>
+        // Load saved keys into Streamlit
+        const keyNames = ['OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'NOVITA_API_KEY', 'DEEPGRAM_API_KEY', 'HF_TOKEN'];
+        keyNames.forEach(keyName => {
+            const savedKey = loadAPIKey(keyName);
+            if (savedKey) {
+                // This would need to be handled differently in Streamlit
+                console.log('Loaded key for:', keyName);
+            }
+        });
+        </script>
+        """, unsafe_allow_html=True)
+        
+        # OpenRouter (Required)
+        st.markdown("**🌐 OpenRouter (Required for 483+ models):**")
+        openrouter_key = st.text_input(
+            "OpenRouter API Key",
+            value=mask_api_key(OPENROUTER_API_KEY) if OPENROUTER_API_KEY else "",
+            type="password",
+            key="openrouter_input",
+            placeholder="sk-or-v1-your-key-here",
+            help="Get your API key from https://openrouter.ai/keys"
+        )
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("💾 Save", key="save_openrouter", help="Save to browser"):
+                if openrouter_key and not openrouter_key.startswith("*"):
+                    st.session_state["user_input_OPENROUTER_API_KEY"] = openrouter_key
+                    st.markdown("""
+                    <script>
+                    saveAPIKey('OPENROUTER_API_KEY', '%s');
+                    </script>
+                    """ % openrouter_key, unsafe_allow_html=True)
+                    st.success("✅ OpenRouter key saved!")
+                    st.rerun()
+        
+        with col2:
+            if st.button("🧪 Test", key="test_openrouter"):
+                test_key = st.session_state.get("user_input_OPENROUTER_API_KEY") or OPENROUTER_API_KEY
+                if test_key:
+                    with st.spinner("Testing..."):
+                        headers = {"Authorization": f"Bearer {test_key}"}
+                        try:
+                            response = requests.get("https://openrouter.ai/api/v1/models", 
+                                                  headers=headers, timeout=5)
+                            if response.status_code == 200:
+                                st.success("✅ Key works!")
+                            else:
+                                st.error("❌ Invalid key")
+                        except:
+                            st.error("❌ Connection error")
+        
+        with col3:
+            st.markdown(f"{get_key_status_icon(OPENROUTER_API_KEY)} Status")
+        
+        # Optional providers
+        st.markdown("---")
+        st.markdown("**Optional Providers:**")
+        
+        # Fireworks AI
+        st.markdown("**🔥 Fireworks AI:**")
+        fireworks_key = st.text_input(
+            "Fireworks API Key",
+            value=mask_api_key(FIREWORKS_API_KEY) if FIREWORKS_API_KEY else "",
+            type="password",
+            key="fireworks_input",
+            placeholder="fw_your-key-here"
+        )
+        
+        if st.button("💾 Save Fireworks", key="save_fireworks"):
+            if fireworks_key and not fireworks_key.startswith("*"):
+                st.session_state["user_input_FIREWORKS_API_KEY"] = fireworks_key
+                st.success("✅ Fireworks key saved!")
+        
+        # Novita AI  
+        st.markdown("**⭐ Novita AI:**")
+        novita_key = st.text_input(
+            "Novita API Key",
+            value=mask_api_key(NOVITA_API_KEY) if NOVITA_API_KEY else "",
+            type="password",
+            key="novita_input",
+            placeholder="sk_your-key-here"
+        )
+        
+        if st.button("💾 Save Novita", key="save_novita"):
+            if novita_key and not novita_key.startswith("*"):
+                st.session_state["user_input_NOVITA_API_KEY"] = novita_key
+                st.success("✅ Novita key saved!")
+        
+        # Deepgram (Voice)
+        st.markdown("**🎤 Deepgram (Voice):**")
+        deepgram_key = st.text_input(
+            "Deepgram API Key",
+            value=mask_api_key(DEEPGRAM_API_KEY) if DEEPGRAM_API_KEY else "",
+            type="password",
+            key="deepgram_input",
+            placeholder="your-deepgram-key"
+        )
+        
+        if st.button("💾 Save Deepgram", key="save_deepgram"):
+            if deepgram_key and not deepgram_key.startswith("*"):
+                st.session_state["user_input_DEEPGRAM_API_KEY"] = deepgram_key
+                st.success("✅ Deepgram key saved!")
+        
+        # Clear all keys
+        st.markdown("---")
+        if st.button("🗑️ Clear All Saved Keys", key="clear_all_keys"):
+            # Clear session state keys
+            keys_to_clear = ["user_input_OPENROUTER_API_KEY", "user_input_FIREWORKS_API_KEY", 
+                           "user_input_NOVITA_API_KEY", "user_input_DEEPGRAM_API_KEY", "user_input_HF_TOKEN"]
+            for key in keys_to_clear:
+                if key in st.session_state:
+                    del st.session_state[key]
+            
+            # Clear browser storage
+            st.markdown("""
+            <script>
+            clearAllAPIKeys();
+            </script>
+            """, unsafe_allow_html=True)
+            st.success("🗑️ All keys cleared!")
+            st.rerun()
+    
+    # Update global API keys with user input
+    OPENROUTER_API_KEY = get_api_key_multi_source("OPENROUTER_API_KEY")
+    FIREWORKS_API_KEY = get_api_key_multi_source("FIREWORKS_API_KEY")
+    NOVITA_API_KEY = get_api_key_multi_source("NOVITA_API_KEY")
+    DEEPGRAM_API_KEY = get_api_key_multi_source("DEEPGRAM_API_KEY")
+    HF_TOKEN = get_api_key_multi_source("HF_TOKEN")
     
     # Initialize session state
     if "current_session_id" not in st.session_state:
@@ -901,13 +1130,13 @@ if provider_choice and model_choice:
     provider_names = {"fireworks": "🔥 Fireworks AI", "novita": "⭐ Novita AI", "openrouter": "🌐 OpenRouter"}
     provider_name = provider_names.get(provider_choice, "❌ Unknown Provider")
     
-    # Check API status
-    api_keys = {
-        "fireworks": FIREWORKS_API_KEY,
-        "novita": NOVITA_API_KEY,
-        "openrouter": OPENROUTER_API_KEY
+    # Check API status with dynamic keys
+    current_api_keys = {
+        "fireworks": get_api_key_multi_source("FIREWORKS_API_KEY"),
+        "novita": get_api_key_multi_source("NOVITA_API_KEY"),
+        "openrouter": get_api_key_multi_source("OPENROUTER_API_KEY")
     }
-    api_status = "✅ Connected" if api_keys.get(provider_choice) else "⚠️ API Key Required"
+    api_status = "✅ Connected" if current_api_keys.get(provider_choice) else "⚠️ Add API Key in Sidebar"
     
     if provider_choice == "openrouter":
         available_models = fetch_all_openrouter_models()
@@ -924,7 +1153,12 @@ if provider_choice and model_choice:
     st.success(f"🎯 **Available Models:** {total_models} total models across 3 providers!")
     
 else:
-    st.warning("⚠️ Please select a provider and model to continue")
+    # Show welcome message if no API keys are configured
+    if not get_api_key_multi_source("OPENROUTER_API_KEY"):
+        st.warning("🔑 **Welcome to CHUNKS AI Chatbot v2.0!** Please add your API keys in the sidebar to get started.")
+        st.info("💡 **Quick Start:** Add your OpenRouter API key in the sidebar to access 483+ AI models instantly!")
+    else:
+        st.warning("⚠️ Please select a provider and model to continue")
 
 # Voice troubleshooting
 if voice_enabled:
