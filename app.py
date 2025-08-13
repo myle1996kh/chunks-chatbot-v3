@@ -776,13 +776,8 @@ with st.sidebar:
     # Logo and Header
     col1, col2 = st.columns([1, 3])
     with col1:
-        st.markdown("""
-        <div style="text-align: center; padding: 10px; background: linear-gradient(45deg, #667eea, #764ba2); 
-                    border-radius: 50%; width: 60px; height: 60px; display: flex; align-items: center; 
-                    justify-content: center; margin: auto;">
-            <span style="color: white; font-size: 24px; font-weight: bold;">C</span>
-        </div>
-        """, unsafe_allow_html=True)
+        # Display CHUNKS logo
+        st.image("logo.png", width=60)
     with col2:
         st.markdown("### 🚀 CHUNKS AI CHATBOT v2.0")
     
@@ -1224,14 +1219,14 @@ with chat_container:
                                 audio_content = deepgram_voice.text_to_speech(message_text, voice_model)
                                 if audio_content:
                                     st.audio(audio_content, format="audio/mp3", autoplay=True)
-                                    st.success(f"🔊 Playing with Deepgram ({voice_model})!")
+                                    st.success("🔊 ✅")
                                 else:
                                     st.error("❌ Deepgram TTS failed - check API key")
                         elif "Google TTS" in voice_method:
                             voice_file = generate_voice_gtts(message_text)
                             if voice_file:
                                 st.audio(voice_file, format="audio/mp3", autoplay=True)
-                                st.success("🔊 Playing with Google TTS!")
+                                st.success("🔊 ✅")
                             else:
                                 st.error("❌ Google TTS failed - install gtts")
                         else:
