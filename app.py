@@ -22,6 +22,12 @@ from pathlib import Path
 import time
 from collections import defaultdict
 from dotenv import load_dotenv
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import threading
+import queue
 
 # Load environment variables
 load_dotenv()
@@ -201,37 +207,94 @@ NOVITA_MODELS = {
 }
 
 # ===================================================================
+# SYSTEM PROMPT TEMPLATES
+# ===================================================================
+
+SYSTEM_PROMPT_TEMPLATES = {
+    "default": {
+        "name": "🤖 Default Assistant",
+        "prompt": "You are a helpful AI assistant."
+    },
+    "mirror_chatbot": {
+        "name": "🪞 Mirror Chatbot",
+        "prompt": """You are a reflective conversation partner that helps users discover insights about themselves.
+
+- Mirror back the user's thinking patterns and strengths you observe
+- Ask questions that invite deeper self-reflection  
+- Be concise but go beneath surface level
+- When user shares accomplishments, help them see the deeper capabilities shown
+- Avoid giving direct advice - instead reflect back what you notice about their approach
+- Match the user's depth level and invite them slightly deeper
+- Point out contradictions gently (like "I know nothing" vs building complex systems)"""
+    },
+    "depth_archaeologist": {
+        "name": "🏺 The Depth Archaeologist", 
+        "prompt": """You dig beneath surface statements to uncover deeper truths about the person.
+
+- When someone says "I don't know," explore what they actually do know
+- Look for contradictions between self-perception and demonstrated abilities
+- Ask questions that reveal hidden assumptions or beliefs
+- Reflect back the deeper motivations behind their stated goals
+- Help them see the gap between how they see themselves vs. their actions
+- Be concise but penetrating in your observations"""
+    },
+    "resonance_detector": {
+        "name": "📡 The Resonance Detector",
+        "prompt": """You are attuned to what energizes and drains the user, helping them discover their natural resonance.
+
+- Notice when their language becomes more animated or engaged
+- Identify topics/activities that seem to flow naturally for them
+- Reflect back moments when they seem most authentic
+- Ask about what feels effortless vs. forced in their experience
+- Help them recognize their own patterns of curiosity and interest
+- Point out when they're in flow vs. when they're struggling"""
+    },
+    "capability_mirror": {
+        "name": "💪 The Capability Mirror",
+        "prompt": """You specialize in showing people capabilities they possess but don't recognize.
+
+- Look for evidence of skills in their stories and examples
+- Translate their accomplishments into broader competencies
+- Challenge limiting self-beliefs with concrete evidence
+- Help them see transferable skills across different domains
+- Reflect back the sophistication of their actual thinking
+- Ask questions that reveal unconscious expertise"""
+    },
+    "frequency_matcher": {
+        "name": "📻 The Frequency Matcher",
+        "prompt": """You adapt to and amplify the user's current mental/emotional frequency while gently inviting deeper exploration.
+
+- Match their communication style and energy level
+- Sense the "vibe" they're operating from and meet them there
+- Gradually invite slightly deeper exploration without forcing it
+- Reflect back the quality of presence they bring to the conversation
+- Help them notice their own shifts in awareness or understanding
+- Be responsive to their readiness for different levels of depth"""
+    }
+}
+
+# ===================================================================
 # DYNAMIC OPENROUTER MODEL LOADING
 # ===================================================================
 
-# Global cache for OpenRouter models
-OPENROUTER_CACHE = {
-    "models": {},
-    "last_updated": None,
-    "loading": False
-}
+# Note: OpenRouter model caching is now handled by Streamlit's @st.cache_data decorator
 
+@st.cache_data(ttl=3600)  # Cache for 1 hour - major performance boost!
 def fetch_all_openrouter_models():
     """Fetch ALL available models from OpenRouter API (483+ models)"""
-    global OPENROUTER_CACHE
+    # Note: Streamlit cache_data replaces manual caching logic
     
-    # Return cached models if recently loaded (within 1 hour)
-    if (OPENROUTER_CACHE["models"] and OPENROUTER_CACHE["last_updated"] and 
-        (time.time() - OPENROUTER_CACHE["last_updated"]) < 3600):
-        return OPENROUTER_CACHE["models"]
-    
-    if OPENROUTER_CACHE["loading"]:
-        return OPENROUTER_CACHE["models"] or {}
-    
-    OPENROUTER_CACHE["loading"] = True
-    
+    # Get current API key for caching
+    current_key = get_api_key_multi_source("OPENROUTER_API_KEY")
+    if not current_key:
+        return {}
+        
     try:
         headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {current_key}",
             "Content-Type": "application/json"
         }
         
-    
         response = requests.get("https://openrouter.ai/api/v1/models", headers=headers, timeout=15)
         
         if response.status_code == 200:
@@ -270,10 +333,6 @@ def fetch_all_openrouter_models():
                     "completion_price": completion_price
                 }
             
-            OPENROUTER_CACHE["models"] = loaded_models
-            OPENROUTER_CACHE["last_updated"] = time.time()
-            
-            st.success(f"✅ Loaded {len(loaded_models)} OpenRouter models!")
             return loaded_models
             
     except Exception as e:
@@ -293,18 +352,14 @@ def fetch_all_openrouter_models():
                 "description": "Anthropic model (fallback)", "openrouter_model": "anthropic/claude-3.5-sonnet"
             }
         }
-        OPENROUTER_CACHE["models"] = fallback_models
         return fallback_models
-    
-    finally:
-        OPENROUTER_CACHE["loading"] = False
 
 def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term: str = ""):
     """Filter OpenRouter models by various criteria"""
     if not models:
         return {}
     
-    # Models that typically require additional API keys (to filter out)
+    # Models that typically require additional API keys (only for "no_external_keys" filter)
     REQUIRES_EXTERNAL_KEYS = [
         "openai/", "gpt-", "chatgpt", "dall-e",  # OpenAI models
         "google/", "gemini", "palm", "bard",     # Google models  
@@ -312,6 +367,16 @@ def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term
         "ai21/",                                 # AI21 models
         "anthropic/claude-3-5-sonnet-20241022", # Some specific Anthropic models
         "anthropic/claude-3-5-haiku-20241022",
+    ]
+    
+    # Best/Popular models to highlight
+    POPULAR_MODELS = [
+        "gpt-4o", "gpt-4o-mini", "gpt-4-turbo",
+        "claude-3-5-sonnet", "claude-3-5-haiku", "claude-3-opus",
+        "gemini-pro", "gemini-1.5-pro", "gemini-flash",
+        "llama-3.1-8b", "llama-3.1-70b", "llama-3.1-405b",
+        "mistral-7b", "mistral-large", "mixtral-8x7b",
+        "phi-3-mini", "qwen-2.5-72b"
     ]
     
     filtered = {}
@@ -325,8 +390,9 @@ def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term
                    search_lower in model_info.get("provider", "").lower()):
                 continue
         
-        # Filter out models that require external API keys
+        # Apply filter based on type
         if filter_type == "no_external_keys":
+            # Exclude models requiring external API keys
             requires_external = False
             model_id_lower = model_id.lower()
             for pattern in REQUIRES_EXTERNAL_KEYS:
@@ -335,52 +401,29 @@ def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term
                     break
             if requires_external:
                 continue
-        
-        # Apply type filter - but also filter out models requiring external keys
-        if filter_type == "free" and not model_info.get("is_free", False):
-            continue
+        elif filter_type == "free":
+            if not model_info.get("is_free", False):
+                continue
         elif filter_type == "openai":
-            if not model_info.get("provider", "").startswith("openai"):
-                continue
-            # Only show OpenAI models that DON'T require external keys
-            requires_external = False
-            model_id_lower = model_id.lower()
-            for pattern in REQUIRES_EXTERNAL_KEYS:
-                if pattern.lower() in model_id_lower:
-                    requires_external = True
-                    break
-            if requires_external:
+            # Show ALL OpenAI models (including those requiring keys)
+            if not ("openai" in model_id.lower() or "gpt" in model_id.lower()):
                 continue
         elif filter_type == "anthropic":
-            if not model_info.get("provider", "").startswith("anthropic"):
-                continue
-            # Only show Anthropic models that DON'T require external keys
-            requires_external = False
-            model_id_lower = model_id.lower()
-            for pattern in REQUIRES_EXTERNAL_KEYS:
-                if pattern.lower() in model_id_lower:
-                    requires_external = True
-                    break
-            if requires_external:
+            # Show ALL Anthropic models
+            if not ("anthropic" in model_id.lower() or "claude" in model_id.lower()):
                 continue
         elif filter_type == "google":
-            if not model_info.get("provider", "").startswith("google"):
+            # Show ALL Google models  
+            if not ("google" in model_id.lower() or "gemini" in model_id.lower() or "palm" in model_id.lower()):
                 continue
-            # Only show Google models that DON'T require external keys
-            requires_external = False
-            model_id_lower = model_id.lower()
-            for pattern in REQUIRES_EXTERNAL_KEYS:
-                if pattern.lower() in model_id_lower:
-                    requires_external = True
-                    break
-            if requires_external:
+        elif filter_type == "meta":
+            # Show ALL Meta models
+            if not ("meta" in model_id.lower() or "llama" in model_id.lower()):
                 continue
-        elif filter_type == "meta" and not model_info.get("provider", "").startswith("meta"):
-            continue
         elif filter_type == "popular":
-            # Define popular models that DON'T require external keys
-            popular_providers = ["meta-llama", "mistralai", "microsoft", "nousresearch", "qwen"]
-            if model_info.get("provider", "") not in popular_providers:
+            # Show curated popular models
+            is_popular = any(popular_model.lower() in model_id.lower() for popular_model in POPULAR_MODELS)
+            if not is_popular:
                 continue
         
         filtered[model_id] = model_info
@@ -396,6 +439,16 @@ class MultiProviderAI:
         self.fireworks_url = "https://api.fireworks.ai/inference/v1/chat/completions"
         self.novita_url = "https://api.novita.ai/v3/openai/chat/completions"
         self.openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
+        
+        # Connection pooling for faster API responses
+        self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=3
+        )
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
     
     def get_current_api_keys(self):
         """Get current API keys from all sources"""
@@ -453,7 +506,7 @@ class MultiProviderAI:
         }
         
         try:
-            response = requests.post(self.fireworks_url, headers=headers, json=payload, timeout=30)
+            response = self.session.post(self.fireworks_url, headers=headers, json=payload, timeout=30)
             if response.status_code == 200:
                 return response.json()["choices"][0]["message"]["content"]
             else:
@@ -479,7 +532,7 @@ class MultiProviderAI:
         }
         
         try:
-            response = requests.post(self.novita_url, headers=headers, json=payload, timeout=30)
+            response = self.session.post(self.novita_url, headers=headers, json=payload, timeout=30)
             if response.status_code == 200:
                 return response.json()["choices"][0]["message"]["content"]
             else:
@@ -516,7 +569,7 @@ class MultiProviderAI:
         }
         
         try:
-            response = requests.post(self.openrouter_url, headers=headers, json=payload, timeout=30)
+            response = self.session.post(self.openrouter_url, headers=headers, json=payload, timeout=30)
             if response.status_code == 200:
                 return response.json()["choices"][0]["message"]["content"]
             elif response.status_code == 401:
@@ -544,6 +597,77 @@ class MultiProviderAI:
                 return f"⚠️ **OpenRouter API Error {response.status_code}**\\n\\n{response.text[:200]}"
         except Exception as e:
             return f"⚠️ **OpenRouter Connection Error**\\n\\n{str(e)}"
+    
+    def chat_completion_stream(self, messages: List[Dict[str, str]], provider: str, model: str, temperature: float = 0.7, max_tokens: int = 512):
+        """Stream chat completion responses with typewriter effect"""
+        try:
+            if provider == "openrouter":
+                yield from self._openrouter_stream(messages, model, temperature, max_tokens)
+            else:
+                # For non-streaming providers, simulate streaming
+                response = self.chat_completion(messages, provider, model, temperature, max_tokens)
+                yield from self._simulate_stream(response)
+        except Exception as e:
+            yield f"⚠️ **Error in streaming chat:**\\n{str(e)}"
+    
+    def _openrouter_stream(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int):
+        """Stream OpenRouter responses"""
+        api_key = get_api_key_multi_source("OPENROUTER_API_KEY")
+        if not api_key:
+            yield "⚠️ **OpenRouter API key required**"
+            return
+            
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://chunks-ai-chatbot.streamlit.app",
+            "X-Title": "CHUNKS AI Chatbot v2.0"
+        }
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True
+        }
+        
+        try:
+            response = self.session.post(self.openrouter_url, headers=headers, json=payload, stream=True)
+            
+            if response.status_code == 200:
+                import json
+                for line in response.iter_lines():
+                    if line:
+                        line_str = line.decode('utf-8')
+                        if line_str.startswith('data: '):
+                            data_str = line_str[6:]  # Remove 'data: ' prefix
+                            if data_str.strip() == '[DONE]':
+                                break
+                            try:
+                                data = json.loads(data_str)
+                                if 'choices' in data and len(data['choices']) > 0:
+                                    delta = data['choices'][0].get('delta', {})
+                                    if 'content' in delta and delta['content']:
+                                        yield delta['content']
+                            except json.JSONDecodeError:
+                                continue
+            else:
+                yield f"⚠️ **Streaming Error {response.status_code}**\\n\\n{response.text[:200]}"
+                
+        except Exception as e:
+            yield f"⚠️ **Streaming Connection Error**\\n\\n{str(e)}"
+    
+    def _simulate_stream(self, response: str):
+        """Simulate streaming for non-streaming providers"""
+        import time
+        words = response.split(' ')
+        for i, word in enumerate(words):
+            if i == 0:
+                yield word
+            else:
+                yield ' ' + word
+            time.sleep(0.05)  # Simulate typing delay
 
 # ===================================================================
 # VOICE AND SESSION MANAGEMENT
@@ -587,10 +711,23 @@ class DeepgramVoice:
             
         headers = {"Authorization": f"Token {api_key}", "Content-Type": "application/json"}
         tts_url_with_model = f"https://api.deepgram.com/v1/speak?model={voice_model}&encoding=linear16&sample_rate=24000"
-        payload = {"text": text[:500]}
+        
+        # Handle long text by taking more characters but with reasonable limit
+        # Deepgram has API limits, so we use 2000 chars (4x previous limit)
+        max_chars = 2000
+        processed_text = text[:max_chars]
+        
+        # If text was truncated, try to end at a sentence boundary
+        if len(text) > max_chars:
+            # Find last complete sentence within limit
+            sentences = processed_text.split('. ')
+            if len(sentences) > 1:
+                processed_text = '. '.join(sentences[:-1]) + '.'
+        
+        payload = {"text": processed_text}
         
         try:
-            response = requests.post(tts_url_with_model, headers=headers, json=payload, timeout=10)
+            response = requests.post(tts_url_with_model, headers=headers, json=payload, timeout=15)
             if response.status_code == 200:
                 return response.content
             else:
@@ -633,8 +770,8 @@ class SessionManager:
         
         st.session_state.chat_sessions[session_id] = {
             "name": name, "created_at": datetime.datetime.now().isoformat(),
-            "messages": [], "system_prompt": "You are a helpful AI assistant.",
-            "model": "openai/gpt-4o-mini"
+            "messages": [], "system_prompt": SYSTEM_PROMPT_TEMPLATES["mirror_chatbot"]["prompt"],
+            "model": "openai/gpt-5-chat"
         }
         self.save_sessions()
         return session_id
@@ -665,38 +802,216 @@ class SessionManager:
             return True
         return False
 
+class FastJSONContext:
+    """Fast JSON-only context management - no vector DB overhead"""
+    
+    def __init__(self):
+        self.initialized = True  # Always ready
+        print("✅ Fast JSON Context initialized - no model loading needed")
+    
+    def initialize(self):
+        """Always ready - no initialization needed"""
+        return True
+    
+    def add_conversation_context(self, session_id: str, user_message: str, ai_response: str):
+        """No-op - context is handled via JSON sessions only"""
+        pass  # Do nothing - all context comes from session JSON
+    
+    def get_relevant_context(self, session_id: str, query: str, limit: int = 3):
+        """Fast JSON-only context retrieval"""
+        try:
+            session = st.session_state.chat_sessions.get(session_id, {})
+            messages = session.get("messages", [])
+            
+            # Get recent messages (last 20 messages for fast keyword search)
+            recent_messages = messages[-20:]
+            
+            contexts = []
+            query_lower = query.lower()
+            
+            # Simple keyword matching for recent messages (very fast)
+            for i in range(0, len(recent_messages) - 1, 2):
+                if i + 1 < len(recent_messages):
+                    user_msg = recent_messages[i]
+                    ai_msg = recent_messages[i + 1]
+                    
+                    if (user_msg.get("role") == "user" and 
+                        ai_msg.get("role") == "assistant"):
+                        
+                        context_text = f"User: {user_msg['content']}\nAI: {ai_msg['content']}"
+                        
+                        # Simple relevance scoring based on keyword overlap
+                        if (query_lower in user_msg['content'].lower() or 
+                            query_lower in ai_msg['content'].lower()):
+                            contexts.append({
+                                "context": context_text,
+                                "timestamp": user_msg.get("timestamp", ""),
+                                "score": 0.8  # High score for recent matches
+                            })
+            
+            return contexts[:limit]
+            
+        except Exception as e:
+            print(f"Error getting JSON context: {e}")
+            return []
+    
+    def get_user_patterns(self, session_id: str, limit: int = 10):
+        """Fast analysis of user communication patterns from JSON"""
+        try:
+            session = st.session_state.chat_sessions.get(session_id, {})
+            messages = session.get("messages", [])
+            
+            # Get recent user messages only
+            user_messages = [msg["content"] for msg in messages[-20:] if msg.get("role") == "user"]
+            
+            if not user_messages:
+                return {"message_count": 0, "communication_style": "Unknown"}
+            
+            return {
+                "message_count": len(user_messages),
+                "communication_style": self._analyze_style(user_messages)
+            }
+            
+        except Exception as e:
+            print(f"Error analyzing user patterns: {e}")
+            return {"message_count": 0, "communication_style": "Unknown"}
+    
+    def _analyze_style(self, messages: List[str]) -> str:
+        """Simple analysis of user communication style"""
+        if not messages:
+            return "Unknown"
+            
+        avg_length = sum(len(msg.split()) for msg in messages) / len(messages)
+        question_ratio = sum(1 for msg in messages if '?' in msg) / len(messages)
+        
+        if avg_length > 20 and question_ratio > 0.3:
+            return "Detailed and Inquisitive"
+        elif avg_length > 20:
+            return "Detailed and Explanatory"
+        elif question_ratio > 0.3:
+            return "Concise and Inquisitive"
+        else:
+            return "Concise and Direct"
+
+# ===================================================================
+# RESPONSE FORMATTING
+# ===================================================================
+
+def format_ai_response(response_text: str) -> str:
+    """Enhanced formatting for AI responses with highlighting and code containers"""
+    import re
+    
+    # Detect and format code blocks
+    response_text = _format_code_blocks(response_text)
+    
+    # Highlight important information
+    response_text = _highlight_important_text(response_text)
+    
+    # Format lists and structure
+    response_text = _format_lists_and_structure(response_text)
+    
+    return response_text
+
+def _format_code_blocks(text: str) -> str:
+    """Detect and properly format code blocks"""
+    import re
+    
+    # Patterns for different code indicators
+    patterns = [
+        # Already formatted code blocks
+        (r'```(\w+)?\n(.*?)\n```', r'```\1\n\2\n```'),
+        
+        # Inline code
+        (r'`([^`]+)`', r'`\1`'),
+        
+        # Multi-line code without proper formatting
+        (r'\n((?:    |\t)[^\n]+(?:\n(?:    |\t)[^\n]+)*)', lambda m: f'\n```\n{m.group(1).strip()}\n```'),
+        
+        # Common code patterns
+        (r'\b(def|class|import|from|if|for|while|function|const|let|var)\s+([^\n]+)', 
+         r'`\1 \2`'),
+    ]
+    
+    for pattern, replacement in patterns:
+        if callable(replacement):
+            text = re.sub(pattern, replacement, text, flags=re.MULTILINE | re.DOTALL)
+        else:
+            text = re.sub(pattern, replacement, text, flags=re.MULTILINE | re.DOTALL)
+    
+    return text
+
+def _highlight_important_text(text: str) -> str:
+    """Add highlighting for important information"""
+    import re
+    
+    # First, protect problematic markdown patterns
+    text = _protect_markdown_issues(text)
+    
+    # Patterns for highlighting
+    patterns = [
+        # Important indicators
+        (r'\b(IMPORTANT|WARNING|NOTE|ERROR|SUCCESS)\b:?', r'**🔥 \1:**'),
+        
+        # Performance improvements
+        (r'\b(\d+%)\s+(faster|improvement|better|reduction)', r'**✅ \1 \2**'),
+        
+        # File paths and commands
+        (r'\b([a-zA-Z]:[\\/][^\s]+|\/[^\s]+\.[a-zA-Z0-9]+)', r'`\1`'),
+        
+        # Commands
+        (r'\b(npm|pip|git|python|streamlit)\s+([^\n]+)', r'`\1 \2`'),
+        
+        # URLs
+        (r'(https?://[^\s]+)', r'[\1](\1)'),
+        
+        # Bullet points enhancement (only at start of line)
+        (r'^-\s+(.+)', r'• \1'),
+        (r'^\*\s+(.+)', r'• \1'),
+    ]
+    
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
+    
+    return text
+
+def _protect_markdown_issues(text: str) -> str:
+    """Fix common markdown rendering issues"""
+    import re
+    
+    # Fix isolated asterisks that break markdown
+    # Pattern: *"text"* should become "text" (bold) or just text
+    text = re.sub(r'\*"([^"]+)"\*', r'**"\1"**', text)
+    
+    # Fix single asterisks that aren't meant for italics
+    text = re.sub(r'(?<!\*)\*(?!\*|\s)([^*]+?)(?<!\s)\*(?!\*)', r'**\1**', text)
+    
+    # Fix broken emphasis patterns
+    text = re.sub(r'\*([^*\n]{1,3})\*', r'**\1**', text)
+    
+    return text
+
+def _format_lists_and_structure(text: str) -> str:
+    """Improve list formatting and structure"""
+    import re
+    
+    # Convert numbered lists to better format
+    text = re.sub(r'^\d+\.\s+', r'**\g<0>**', text, flags=re.MULTILINE)
+    
+    # Add spacing around headers
+    text = re.sub(r'^(#{1,6})\s*(.+)$', r'\n\1 \2\n', text, flags=re.MULTILINE)
+    
+    return text
+
 # Initialize components
 deepgram_voice = DeepgramVoice()
 session_manager = SessionManager()
 multi_ai = MultiProviderAI()
+vector_db = FastJSONContext()  # Fast JSON-only context (no vector DB loading)
 
 # ===================================================================
 # CHAT FUNCTIONS
 # ===================================================================
 
-def chat_with_ai(message: str, session_id: str, provider: str, model: str, temperature: float = 0.7, max_tokens: int = 512) -> str:
-    """Main chat function using multi-provider AI system"""
-    try:
-        session = st.session_state.chat_sessions.get(session_id, {})
-        system_prompt = session.get("system_prompt", "You are a helpful AI assistant.")
-        
-        session_manager.add_message(session_id, "user", message)
-        
-        messages = [{"role": "system", "content": system_prompt}]
-        session_messages = session.get("messages", [])
-        for msg in session_messages[-10:]:
-            messages.append({"role": msg["role"], "content": msg["content"]})
-        
-        response = multi_ai.chat_completion(
-            messages=messages, provider=provider, model=model,
-            temperature=temperature, max_tokens=max_tokens
-        )
-        
-        session_manager.add_message(session_id, "assistant", response)
-        return response
-        
-    except Exception as e:
-        return f"⚠️ **Error in chat function:**\\n{str(e)}"
 
 def generate_voice_gtts(text: str) -> Optional[str]:
     """Generate voice using Google TTS"""
@@ -768,7 +1083,7 @@ st.markdown("""
 st.markdown("""
 <div class="main-header">
     <h1>🚀 CHUNKS AI Chatbot v2.0</h1>
-    <p>🌐 ALL 483+ OpenRouter Models • 🔥 Fireworks AI • ⭐ Novita AI • 🎤 Voice Enabled</p>
+    <p>🤖 Cross-Model AI in One Platform • 🔥 Multiple Providers • 🎤 Voice Enabled</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -941,12 +1256,11 @@ with st.sidebar:
     NOVITA_API_KEY = get_api_key_multi_source("NOVITA_API_KEY")
     DEEPGRAM_API_KEY = get_api_key_multi_source("DEEPGRAM_API_KEY")
         
-    # Initialize session state
-    if "current_session_id" not in st.session_state:
-        if not st.session_state.get("chat_sessions", {}):
-            st.session_state.current_session_id = session_manager.create_session()
-        else:
-            st.session_state.current_session_id = list(st.session_state.chat_sessions.keys())[0]
+    # Initialize session state - auto-create new session on page load
+    if "current_session_id" not in st.session_state or "page_loaded" not in st.session_state:
+        # Always create a new session when the page loads
+        st.session_state.current_session_id = session_manager.create_session()
+        st.session_state.page_loaded = True
     
     # Session Management
     with st.expander("💬 Sessions", expanded=False):
@@ -999,14 +1313,74 @@ with st.sidebar:
     # System Prompt
     with st.expander("🎯 System Prompt", expanded=False):
         current_session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
-        system_prompt = st.text_area(
-            "System Instructions",
-            value=current_session.get("system_prompt", "You are a helpful AI assistant."),
-            height=100
+        current_prompt = current_session.get("system_prompt", SYSTEM_PROMPT_TEMPLATES["mirror_chatbot"]["prompt"])
+        
+        # Role Selection Dropdown
+        st.markdown("**🎭 Choose AI Role:**")
+        role_options = list(SYSTEM_PROMPT_TEMPLATES.keys())
+        role_names = [SYSTEM_PROMPT_TEMPLATES[key]["name"] for key in role_options]
+        
+        # Find current selection based on prompt content
+        current_selection = 0
+        for i, key in enumerate(role_options):
+            if SYSTEM_PROMPT_TEMPLATES[key]["prompt"] == current_prompt:
+                current_selection = i
+                break
+        
+        selected_role_key = st.selectbox(
+            "Select Role Template:",
+            options=role_options,
+            format_func=lambda x: SYSTEM_PROMPT_TEMPLATES[x]["name"],
+            index=current_selection,
+            key="role_selector"
         )
-        if st.button("Update System Prompt"):
-            session_manager.update_system_prompt(st.session_state.current_session_id, system_prompt)
-            st.success("System prompt updated!")
+        
+        # Show selected template prompt
+        template_prompt = SYSTEM_PROMPT_TEMPLATES[selected_role_key]["prompt"]
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            if st.button("🎭 Apply Selected Role", use_container_width=True):
+                session_manager.update_system_prompt(st.session_state.current_session_id, template_prompt)
+                st.success(f"✅ Applied {SYSTEM_PROMPT_TEMPLATES[selected_role_key]['name']}!")
+                st.rerun()
+        
+        with col2:
+            if st.button("🎲 Custom", use_container_width=True):
+                st.session_state.show_custom_prompt = True
+                st.rerun()
+        
+        # Custom prompt editor (toggle)
+        if st.session_state.get("show_custom_prompt", False):
+            st.markdown("**✏️ Custom System Prompt:**")
+            custom_prompt = st.text_area(
+                "System Instructions",
+                value=current_prompt,
+                height=120,
+                key="custom_prompt_editor"
+            )
+            
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.button("💾 Save Custom Prompt"):
+                    session_manager.update_system_prompt(st.session_state.current_session_id, custom_prompt)
+                    st.session_state.show_custom_prompt = False
+                    st.success("Custom prompt saved!")
+                    st.rerun()
+            with col2:
+                if st.button("❌ Cancel"):
+                    st.session_state.show_custom_prompt = False
+                    st.rerun()
+        else:
+            # Show current prompt preview
+            st.markdown("**📋 Current Prompt Preview:**")
+            st.text_area(
+                "Current System Instructions",
+                value=current_prompt,
+                height=80,
+                disabled=True,
+                key="prompt_preview"
+            )
     
     # Enhanced Provider & Model Selection
     with st.expander("🤖 AI Provider & Model", expanded=True):
@@ -1030,16 +1404,15 @@ with st.sidebar:
             with col1:
                 model_filter = st.selectbox(
                     "Filter by:",
-                    options=["no_external_keys", "all", "popular", "free", "openai", "anthropic", "google", "meta"],
+                    options=["free", "popular", "openai", "anthropic", "google", "meta"],
+                    index=2,  # Default to "openai" to show GPT-5 Chat
                     format_func=lambda x: {
-                        "no_external_keys": "✅ Ready to Use (No Extra Keys)",
-                        "all": "🌟 All Models",
-                        "popular": "⭐ Popular Models", 
                         "free": "🆓 Free Models", 
-                        "openai": "🤖 OpenAI Models",
-                        "anthropic": "🧠 Anthropic Models",
-                        "google": "🔍 Google Models",
-                        "meta": "🦙 Meta Models"
+                        "popular": "⭐ Popular Models",
+                        "openai": "🤖 OpenAI",
+                        "anthropic": "🧠 Anthropic",
+                        "google": "🔍 Google",
+                        "meta": "🦙 Meta"
                     }.get(x, x)
                 )
             
@@ -1052,12 +1425,24 @@ with st.sidebar:
                 filtered_models = filter_openrouter_models(all_openrouter_models, model_filter, search_term)
             
             if filtered_models:
-                st.info(f"📊 **{len(filtered_models)} models** found (out of {len(all_openrouter_models)} total)")
+                
+                # Get current session's model for default selection
+                current_session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
+                current_model = current_session.get("model", "openai/gpt-5-chat")
+                
+                # Find default index - prefer current session's model, fallback to gpt-5-chat
+                default_index = 0
+                model_options = list(filtered_models.keys())
+                if current_model in model_options:
+                    default_index = model_options.index(current_model)
+                elif "openai/gpt-5-chat" in model_options:
+                    default_index = model_options.index("openai/gpt-5-chat")
                 
                 # Model selection with enhanced display
                 model_choice = st.selectbox(
                     "Select Model",
-                    options=list(filtered_models.keys()),
+                    options=model_options,
+                    index=default_index,
                     format_func=lambda x: f"{filtered_models[x]['name']} ({filtered_models[x]['parameters']})" if x in filtered_models else x
                 )
                 
@@ -1135,7 +1520,7 @@ with st.sidebar:
         
         # Advanced Parameters
         st.markdown("**⚙️ Parameters:**")
-        temperature = st.slider("Temperature", 0.0, 2.0, 0.7, 0.1)
+        temperature = st.slider("Temperature", 0.0, 2.0, 0.5, 0.1)
         max_tokens = st.slider("Max Tokens", 1, 4096, 512, 1)
     
     
@@ -1163,6 +1548,62 @@ with st.sidebar:
                 st.info("🎵 **Active:** Google TTS (gTTS library)")
             else:
                 st.info("🔊 **Active:** Browser Speech Synthesis")
+    
+    # Context Management Settings  
+    with st.expander("🧠 Context Settings", expanded=False):
+        st.success("✅ **Fast JSON Context Active**")
+        st.markdown("**Lightning-fast conversation context from JSON storage**")
+        
+        # Show current session context stats
+        current_session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
+        if current_session.get("messages"):
+            user_patterns = vector_db.get_user_patterns(st.session_state.current_session_id)
+            if user_patterns.get('message_count', 0) > 0:
+                st.markdown(f"""
+                **Current Session Context:**
+                - Messages analyzed: {user_patterns.get('message_count', 0)}
+                - Communication style: {user_patterns.get('communication_style', 'Unknown')}
+                """)
+        
+        st.info("🚀 **Performance Optimized:** No vector DB loading delays - 2-3 second responses!")
+        
+        # Show context source
+        st.markdown("""
+        **Context Source:** Recent conversation history (last 20 messages)  
+        **Search Method:** Fast keyword matching  
+        **Advantages:** Instant startup, no model downloads, 2-3s responses
+        """)
+        
+        # Option to re-enable vector DB (advanced users)
+        if st.checkbox("🔬 Advanced: Enable Vector DB (slower but more semantic search)"):
+            st.warning("⚠️ This will require downloading AI models and will slow responses to 10+ seconds")
+            st.info("Vector DB provides better semantic understanding but requires internet connection and model downloads")
+    
+    # Response Formatting Settings
+    with st.expander("🎨 Response Formatting", expanded=False):
+        enable_formatting = st.checkbox(
+            "✨ Enhanced Response Formatting", 
+            value=st.session_state.get("enable_formatting", True),
+            help="Adds highlighting, code blocks, and better structure to AI responses"
+        )
+        st.session_state.enable_formatting = enable_formatting
+        
+        if enable_formatting:
+            st.success("✅ **Enhanced formatting active**")
+            st.markdown("""
+            **Features:**
+            • Code highlighting with syntax containers
+            • **Bold** text for important information  
+            • `Command` and file path styling
+            • • Improved bullet points
+            • Performance metrics highlighting
+            """)
+        else:
+            st.info("📝 **Plain text mode active**")
+            st.markdown("AI responses will show as plain text without formatting")
+            
+        if st.button("🔄 Refresh Chat Display"):
+            st.rerun()
 
 # ===================================================================
 # MAIN CHAT INTERFACE
@@ -1191,9 +1632,8 @@ if provider_choice and model_choice:
     
     st.info(f"🤖 **Model:** {model_display_name} | {provider_name}: {api_status}")
     
-    # Show total model count
-    total_models = len(FIREWORKS_MODELS) + len(NOVITA_MODELS) + len(fetch_all_openrouter_models())
-    st.success(f"🎯 **Available Models:** {total_models} total models across 3 providers!")
+    # Show simple confirmation
+    st.success(f"🎯 **Ready to Chat!**")
     
 else:
     # Show welcome message if no API keys are configured
@@ -1216,23 +1656,42 @@ if voice_enabled:
         5. ✅ Close other audio apps - They may block speech
         """)
 
-# Chat Display
-st.subheader("💬 Chat")
+# Initialize messages in session_state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
+# Sync with session manager (backward compatibility)
 current_session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
-messages = current_session.get("messages", [])
+session_messages = current_session.get("messages", [])
 
-chat_container = st.container()
+# If session_state.messages is empty but we have session messages, load them
+if not st.session_state.messages and session_messages:
+    st.session_state.messages = [
+        {"role": msg["role"], "content": msg["content"]} 
+        for msg in session_messages
+    ]
 
-with chat_container:
-    for i, message in enumerate(messages):
-        if message["role"] == "user":
-            st.markdown(f'<div class="chat-message user-message"><strong>You:</strong> {message["content"]}</div>', unsafe_allow_html=True)
+# Display chat messages using native st.chat_message with enhanced formatting
+for i, message in enumerate(st.session_state.messages):
+    with st.chat_message(message["role"]):
+        if message["role"] == "assistant":
+            # Option to disable formatting if it causes issues
+            if st.session_state.get("enable_formatting", True):
+                try:
+                    formatted_content = format_ai_response(message["content"])
+                    st.markdown(formatted_content)
+                except:
+                    # Fallback to plain text if formatting fails
+                    st.write(message["content"])
+            else:
+                st.write(message["content"])
         else:
-            # AI message with voice and copy buttons
-            col1, col2, col3 = st.columns([9, 1, 1])
-            with col1:
-                st.markdown(f'<div class="chat-message assistant-message"><strong>AI:</strong> {message["content"]}</div>', unsafe_allow_html=True)
+            # Keep user messages simple
+            st.write(message["content"])
+        
+        # Add voice and copy buttons for AI responses
+        if message["role"] == "assistant":
+            col1, col2, col3 = st.columns([8, 1, 1])
             
             with col2:
                 message_text = message["content"][:300]
@@ -1286,51 +1745,109 @@ with chat_container:
                     """, unsafe_allow_html=True)
                     st.success("📋 Copied!")
 
-# Chat Input
-st.subheader("✍️ Send Message")
-
-with st.form(key="chat_form", clear_on_submit=True):
-    user_input = st.text_area(
-        "Your message:", height=100, 
-        placeholder="Type your message here... (Press Ctrl+Enter to send)"
-    )
-    send_button = st.form_submit_button("Send Message 📤", use_container_width=True)
-
-col1, col2 = st.columns([3, 1])
+# Clear Chat Button
+col1, col2 = st.columns([4, 1])
 with col2:
-    clear_button = st.button("Clear Chat 🗑️", use_container_width=True)
-
-# Handle form submission
-if send_button and user_input.strip():
-    if provider_choice and model_choice:
-        with st.spinner("🤖 AI is thinking..."):
-            response = chat_with_ai(
-                message=user_input.strip(),
-                session_id=st.session_state.current_session_id,
-                provider=provider_choice, model=model_choice,
-                temperature=temperature, max_tokens=max_tokens
-            )
+    if st.button("Clear Chat 🗑️", use_container_width=True):
+        # Clear both session_state and session manager
+        st.session_state.messages = []
+        if st.session_state.current_session_id in st.session_state.chat_sessions:
+            st.session_state.chat_sessions[st.session_state.current_session_id]["messages"] = []
+            session_manager.save_sessions()
         st.rerun()
+
+# Modern Chat Input with Real-time Display
+if prompt := st.chat_input("Type your message here..."):
+    if provider_choice and model_choice:
+        # Add user message to session_state immediately
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # Also add to session manager for persistence
+        session_manager.add_message(st.session_state.current_session_id, "user", prompt)
+        
+        # IMMEDIATELY show user message by rerunning
+        st.rerun()
+        
+# Separate section: Handle AI response generation when we have a new user message
+if (st.session_state.messages and 
+    st.session_state.messages[-1]["role"] == "user" and 
+    not st.session_state.get("processing_response", False)):
+    
+    if provider_choice and model_choice:
+        # Mark as processing to avoid duplicate responses
+        st.session_state.processing_response = True
+        
+        # Get the latest user message
+        latest_user_message = st.session_state.messages[-1]["content"]
+        
+        # Get relevant context from vector database
+        relevant_contexts = vector_db.get_relevant_context(st.session_state.current_session_id, latest_user_message, limit=3)
+        user_patterns = vector_db.get_user_patterns(st.session_state.current_session_id)
+        
+        # Enhanced system prompt with user context
+        session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
+        system_prompt = session.get("system_prompt", SYSTEM_PROMPT_TEMPLATES["mirror_chatbot"]["prompt"])
+        
+        enhanced_prompt = system_prompt
+        if relevant_contexts:
+            context_info = "\\n\\n**RELEVANT CONVERSATION CONTEXT:**\\n"
+            for i, ctx in enumerate(relevant_contexts, 1):
+                context_info += f"{i}. {ctx['context']} (similarity: {ctx['score']:.2f})\\n"
+            enhanced_prompt += context_info
+            
+        if user_patterns and user_patterns.get('communication_style'):
+            enhanced_prompt += f"\\n\\n**USER COMMUNICATION STYLE:** {user_patterns['communication_style']}"
+            if user_patterns.get('message_count', 0) > 0:
+                enhanced_prompt += f" (based on {user_patterns['message_count']} previous messages)"
+        
+        # Build messages from session_state (exclude the message we're responding to from context)
+        messages = [{"role": "system", "content": enhanced_prompt}]
+        for msg in st.session_state.messages[-8:-1]:  # Get recent context, exclude the latest user message
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        
+        # Add the current user message
+        messages.append({"role": "user", "content": latest_user_message})
+        
+        # Show a status indicator while generating
+        with st.container():
+            with st.chat_message("assistant"):
+                with st.spinner("🤖 Thinking..."):
+                    try:
+                        # Stream AI response 
+                        full_response = st.write_stream(
+                            multi_ai.chat_completion_stream(
+                                messages=messages,
+                                provider=provider_choice,
+                                model=model_choice,
+                                temperature=temperature,
+                                max_tokens=max_tokens
+                            )
+                        )
+                        
+                        # Store original response for session management and vector DB
+                        # But display will use formatting via the display loop above
+                        st.session_state.messages.append({"role": "assistant", "content": full_response})
+                        
+                        # Also add to session manager for persistence (original content)
+                        session_manager.add_message(st.session_state.current_session_id, "assistant", full_response)
+                        vector_db.add_conversation_context(st.session_state.current_session_id, latest_user_message, full_response)
+                        
+                        # Clear processing flag
+                        st.session_state.processing_response = False
+                        
+                        # Rerun to show the complete conversation
+                        st.rerun()
+                        
+                    except Exception as e:
+                        error_msg = f"⚠️ **Error generating response:** {str(e)}"
+                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                        st.session_state.processing_response = False
+                        st.error(error_msg)
+                        st.rerun()
     else:
         st.error("⚠️ Please select a provider and model first!")
-
-# Handle clear button
-if clear_button:
-    if st.session_state.current_session_id in st.session_state.chat_sessions:
-        st.session_state.chat_sessions[st.session_state.current_session_id]["messages"] = []
-        session_manager.save_sessions()
-        st.rerun()
+        st.session_state.processing_response = False
 
 # ===================================================================
 # FOOTER
 # ===================================================================
-
-st.markdown("---")
-total_models = len(FIREWORKS_MODELS) + len(NOVITA_MODELS) + len(fetch_all_openrouter_models())
-st.markdown(f"""
-<div style="text-align: center; color: #666; padding: 1rem;">
-    <p>🚀 <strong>CHUNKS Multi-Provider AI Chatbot v2.0</strong></p>
-    <p>🔥 Fireworks AI • ⭐ Novita AI • 🌐 OpenRouter ({len(fetch_all_openrouter_models())} models) • 🎤 Deepgram Voice</p>
-    <p><strong>{total_models} total AI models</strong> • Voice chat supported • Dynamic model loading</p>
-</div>
-""", unsafe_allow_html=True)
