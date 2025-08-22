@@ -84,13 +84,7 @@ class AuthManager:
                 st.markdown(f"**Logged in as:** {st.session_state.user_name}")
                 st.markdown(f"**Username:** {st.session_state.username}")
                 
-                login_time = st.session_state.get("login_time")
-                if login_time:
-                    time_diff = datetime.now() - login_time
-                    remaining_time = timedelta(minutes=self.session_timeout) - time_diff
-                    if remaining_time.total_seconds() > 0:
-                        remaining_minutes = int(remaining_time.total_seconds() / 60)
-                        st.markdown(f"**Session expires in:** {remaining_minutes} minutes")
+                # Session timeout still active in background, but no longer displayed
                 
                 if st.button("Logout", type="secondary"):
                     self.logout()

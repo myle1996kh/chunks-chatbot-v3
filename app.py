@@ -349,6 +349,12 @@ def fetch_all_openrouter_models():
         print(f"❌ Failed to load OpenRouter models: {e}")
         # Return fallback popular models
         fallback_models = {
+            "openai/gpt-5-chat": {
+                "name": "GPT-5 Chat", "parameters": "256k+ context", 
+                "description": "OpenAI's most advanced chat model", "openrouter_model": "openai/gpt-5-chat",
+                "context_length": 256000, "is_free": False, "provider": "openai",
+                "prompt_price": 0.01, "completion_price": 0.03
+            },
             "openai/gpt-5": {
                 "name": "GPT-5", "parameters": "256k+ context", 
                 "description": "OpenAI's most advanced model", "openrouter_model": "openai/gpt-5",
@@ -400,7 +406,7 @@ def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term
     
     # Best/Popular models to highlight
     POPULAR_MODELS = [
-        "openai/gpt-5", "openai/gpt-4o", "openai/gpt-4o-mini", "openai/gpt-4-turbo",
+        "openai/gpt-5-chat", "openai/gpt-5", "openai/gpt-4o", "openai/gpt-4o-mini", "openai/gpt-4-turbo",
         "anthropic/claude-3-5-sonnet", "anthropic/claude-3-5-haiku", "anthropic/claude-3-opus",
         "google/gemini-pro", "google/gemini-1.5-pro", "google/gemini-flash",
         "meta-llama/llama-3.1-8b", "meta-llama/llama-3.1-70b", "meta-llama/llama-3.1-405b",
@@ -966,7 +972,7 @@ class SessionManager:
         st.session_state.chat_sessions[session_id] = {
             "name": name, "created_at": datetime.datetime.now().isoformat(),
             "messages": [], "system_prompt": SYSTEM_PROMPT_TEMPLATES["default"]["prompt"],
-            "model": "openai/gpt-5"
+            "model": "openai/gpt-5-chat"
         }
         self.save_sessions()
         return session_id
@@ -1673,7 +1679,7 @@ with st.sidebar:
                 model_filter = st.selectbox(
                     "Filter by:",
                     options=["all", "popular", "free", "openai", "anthropic", "google", "meta"],
-                    index=0,  # Default to "all" to show all models
+                    index=3,  # Default to "openai"
                     format_func=lambda x: {
                         "all": "🌟 All Models",
                         "free": "🆓 Free Models", 
@@ -1716,13 +1722,15 @@ with st.sidebar:
                 
                 # Get current session's model for default selection
                 current_session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
-                current_model = current_session.get("model", "openai/gpt-5")
+                current_model = current_session.get("model", "openai/gpt-5-chat")
                 
                 # Find default index - prefer current session's model, fallback to first available
                 default_index = 0
                 model_options = list(filtered_models.keys())
                 if current_model in model_options:
                     default_index = model_options.index(current_model)
+                elif "openai/gpt-5-chat" in model_options:
+                    default_index = model_options.index("openai/gpt-5-chat")
                 elif "openai/gpt-5" in model_options:
                     default_index = model_options.index("openai/gpt-5")
                 elif "openai/gpt-4o" in model_options:
@@ -1818,30 +1826,30 @@ with st.sidebar:
     
     
     # Voice Settings
-    voice_enabled = False
-    voice_input_enabled = False
-    voice_method = "Deepgram TTS (Requires API Key)"
+    voice_enabled = True  # Enable voice output by default
+    voice_input_enabled = True  # Enable voice input by default
+    voice_method = "Speechify (Voice Cloning)"
     voice_model = "aura-asteria-en"
     speechify_voice_id = None
-    auto_voice_response = False
+    auto_voice_response = True  # Enable auto-play by default
     
     with st.expander("🎤 Voice Settings", expanded=False):
         st.markdown("**🎙️ Voice Input Settings:**")
-        voice_input_enabled = st.checkbox("Enable Voice Input (Record → Speech-to-Text)")
+        voice_input_enabled = st.checkbox("Enable Voice Input (Record → Speech-to-Text)", value=True)
         
         st.markdown("**🔊 Voice Output Settings:**")
-        voice_enabled = st.checkbox("Enable Voice Output (Text-to-Speech)")
+        voice_enabled = st.checkbox("Enable Voice Output (Text-to-Speech)", value=True)
         
         if voice_enabled:
-            # Auto-enable auto-play when voice input is enabled
-            default_auto_play = voice_input_enabled
-            auto_voice_response = st.checkbox("Auto-play AI response (when voice enabled)", value=default_auto_play)
+            # Auto-enable auto-play by default
+            auto_voice_response = st.checkbox("Auto-play AI response (when voice enabled)", value=True)
             voice_method = st.radio(
                 "Voice Output Method",
                 options=[
                     "Deepgram TTS (Requires API Key)",
                     "Speechify TTS (Voice Cloning)"
-                ]
+                ],
+                index=1  # Default to Speechify
             )
             
             if "Deepgram" in voice_method:
