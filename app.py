@@ -349,23 +349,35 @@ def fetch_all_openrouter_models():
         print(f"❌ Failed to load OpenRouter models: {e}")
         # Return fallback popular models
         fallback_models = {
+            "openai/gpt-5": {
+                "name": "GPT-5", "parameters": "256k+ context", 
+                "description": "OpenAI's most advanced model", "openrouter_model": "openai/gpt-5",
+                "context_length": 256000, "is_free": False, "provider": "openai",
+                "prompt_price": 0.01, "completion_price": 0.03
+            },
             "openai/gpt-4o": {
-                "name": "GPT-4 Omni", "parameters": "128k context", 
-                "description": "OpenAI model (fallback)", "openrouter_model": "openai/gpt-4o",
+                "name": "GPT-4o", "parameters": "128k context", 
+                "description": "Most capable OpenAI model", "openrouter_model": "openai/gpt-4o",
                 "context_length": 128000, "is_free": False, "provider": "openai",
                 "prompt_price": 0.005, "completion_price": 0.015
             },
             "openai/gpt-4o-mini": {
-                "name": "GPT-4 Omni Mini", "parameters": "128k context",
-                "description": "OpenAI model (fallback)", "openrouter_model": "openai/gpt-4o-mini",
+                "name": "GPT-4o Mini", "parameters": "128k context",
+                "description": "Fast and efficient OpenAI model", "openrouter_model": "openai/gpt-4o-mini",
                 "context_length": 128000, "is_free": False, "provider": "openai",
                 "prompt_price": 0.00015, "completion_price": 0.0006
             },
             "anthropic/claude-3.5-sonnet": {
                 "name": "Claude 3.5 Sonnet", "parameters": "200k context",
-                "description": "Anthropic model (fallback)", "openrouter_model": "anthropic/claude-3.5-sonnet",
+                "description": "Most capable Anthropic model", "openrouter_model": "anthropic/claude-3.5-sonnet",
                 "context_length": 200000, "is_free": False, "provider": "anthropic",
                 "prompt_price": 0.003, "completion_price": 0.015
+            },
+            "google/gemini-1.5-pro": {
+                "name": "Gemini 1.5 Pro", "parameters": "2M context",
+                "description": "Google's most capable model", "openrouter_model": "google/gemini-1.5-pro",
+                "context_length": 2000000, "is_free": False, "provider": "google",
+                "prompt_price": 0.00125, "completion_price": 0.005
             }
         }
         print(f"Using fallback models: {len(fallback_models)} models")
@@ -388,12 +400,12 @@ def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term
     
     # Best/Popular models to highlight
     POPULAR_MODELS = [
-        "gpt-4o", "gpt-4o-mini", "gpt-4-turbo",
-        "claude-3-5-sonnet", "claude-3-5-haiku", "claude-3-opus",
-        "gemini-pro", "gemini-1.5-pro", "gemini-flash",
-        "llama-3.1-8b", "llama-3.1-70b", "llama-3.1-405b",
-        "mistral-7b", "mistral-large", "mixtral-8x7b",
-        "phi-3-mini", "qwen-2.5-72b"
+        "openai/gpt-5", "openai/gpt-4o", "openai/gpt-4o-mini", "openai/gpt-4-turbo",
+        "anthropic/claude-3-5-sonnet", "anthropic/claude-3-5-haiku", "anthropic/claude-3-opus",
+        "google/gemini-pro", "google/gemini-1.5-pro", "google/gemini-flash",
+        "meta-llama/llama-3.1-8b", "meta-llama/llama-3.1-70b", "meta-llama/llama-3.1-405b",
+        "mistralai/mistral-7b", "mistralai/mistral-large", "mistralai/mixtral-8x7b",
+        "microsoft/phi-3-mini", "qwen/qwen-2.5-72b"
     ]
     
     filtered = {}
@@ -441,8 +453,27 @@ def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term
             if not ("meta" in model_id.lower() or "llama" in model_id.lower()):
                 continue
         elif filter_type == "popular":
-            # Show curated popular models
-            is_popular = any(popular_model.lower() in model_id.lower() for popular_model in POPULAR_MODELS)
+            # Show curated popular models - flexible matching
+            is_popular = False
+            model_id_lower = model_id.lower()
+            model_name_lower = model_info.get("name", "").lower()
+            
+            for popular_model in POPULAR_MODELS:
+                popular_lower = popular_model.lower()
+                # Direct match or partial match
+                if (popular_lower in model_id_lower or 
+                    model_id_lower == popular_lower or
+                    popular_lower in model_name_lower):
+                    is_popular = True
+                    break
+                    
+            # Also check for common variations
+            if not is_popular:
+                for keyword in ["gpt-5", "gpt-4o", "gpt-4", "claude-3.5", "claude-3", "gemini", "llama-3"]:
+                    if keyword in model_id_lower or keyword in model_name_lower:
+                        is_popular = True
+                        break
+                        
             if not is_popular:
                 continue
         
@@ -935,7 +966,7 @@ class SessionManager:
         st.session_state.chat_sessions[session_id] = {
             "name": name, "created_at": datetime.datetime.now().isoformat(),
             "messages": [], "system_prompt": SYSTEM_PROMPT_TEMPLATES["default"]["prompt"],
-            "model": "openai/gpt-4o"
+            "model": "openai/gpt-5"
         }
         self.save_sessions()
         return session_id
@@ -1685,13 +1716,15 @@ with st.sidebar:
                 
                 # Get current session's model for default selection
                 current_session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
-                current_model = current_session.get("model", "openai/gpt-4o")
+                current_model = current_session.get("model", "openai/gpt-5")
                 
                 # Find default index - prefer current session's model, fallback to first available
                 default_index = 0
                 model_options = list(filtered_models.keys())
                 if current_model in model_options:
                     default_index = model_options.index(current_model)
+                elif "openai/gpt-5" in model_options:
+                    default_index = model_options.index("openai/gpt-5")
                 elif "openai/gpt-4o" in model_options:
                     default_index = model_options.index("openai/gpt-4o")
                 elif "openai/gpt-4o-mini" in model_options:
