@@ -1676,10 +1676,15 @@ with st.sidebar:
             
             col1, col2 = st.columns(2)
             with col1:
+                # Initialize default filter in session state
+                if "model_filter_index" not in st.session_state:
+                    st.session_state.model_filter_index = 3  # Default to "openai"
+                    
                 model_filter = st.selectbox(
                     "Filter by:",
                     options=["all", "popular", "free", "openai", "anthropic", "google", "meta"],
-                    index=3,  # Default to "openai"
+                    index=st.session_state.model_filter_index,
+                    key="model_filter_select",
                     format_func=lambda x: {
                         "all": "🌟 All Models",
                         "free": "🆓 Free Models", 
@@ -1834,22 +1839,39 @@ with st.sidebar:
     auto_voice_response = True  # Enable auto-play by default
     
     with st.expander("🎤 Voice Settings", expanded=False):
+        # Initialize default values in session state if not set
+        if "voice_input_enabled" not in st.session_state:
+            st.session_state.voice_input_enabled = True
+        if "voice_enabled" not in st.session_state:
+            st.session_state.voice_enabled = True
+        if "auto_voice_response" not in st.session_state:
+            st.session_state.auto_voice_response = True
+        if "voice_method_index" not in st.session_state:
+            st.session_state.voice_method_index = 1  # Default to Speechify
+            
         st.markdown("**🎙️ Voice Input Settings:**")
-        voice_input_enabled = st.checkbox("Enable Voice Input (Record → Speech-to-Text)", value=True)
+        voice_input_enabled = st.checkbox("Enable Voice Input (Record → Speech-to-Text)", 
+                                          value=st.session_state.voice_input_enabled,
+                                          key="voice_input_checkbox")
         
         st.markdown("**🔊 Voice Output Settings:**")
-        voice_enabled = st.checkbox("Enable Voice Output (Text-to-Speech)", value=True)
+        voice_enabled = st.checkbox("Enable Voice Output (Text-to-Speech)", 
+                                   value=st.session_state.voice_enabled,
+                                   key="voice_enabled_checkbox")
         
         if voice_enabled:
             # Auto-enable auto-play by default
-            auto_voice_response = st.checkbox("Auto-play AI response (when voice enabled)", value=True)
+            auto_voice_response = st.checkbox("Auto-play AI response (when voice enabled)", 
+                                             value=st.session_state.auto_voice_response,
+                                             key="auto_voice_checkbox")
             voice_method = st.radio(
                 "Voice Output Method",
                 options=[
                     "Deepgram TTS (Requires API Key)",
                     "Speechify TTS (Voice Cloning)"
                 ],
-                index=1  # Default to Speechify
+                index=st.session_state.voice_method_index,
+                key="voice_method_radio"
             )
             
             if "Deepgram" in voice_method:
