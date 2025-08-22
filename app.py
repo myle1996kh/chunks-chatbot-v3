@@ -966,7 +966,7 @@ class SessionManager:
         st.session_state.chat_sessions[session_id] = {
             "name": name, "created_at": datetime.datetime.now().isoformat(),
             "messages": [], "system_prompt": SYSTEM_PROMPT_TEMPLATES["default"]["prompt"],
-            "model": "openai/gpt-5"
+            "model": "openai/gpt-5-chat "
         }
         self.save_sessions()
         return session_id
