@@ -29,6 +29,11 @@ import numpy as np
 import threading
 import queue
 
+# Import voice clone database and simple UI components
+from voice_database import VoiceCloneDatabase
+from simple_voice_components import render_simple_voice_selector, render_simple_voice_section
+from auth import AuthManager
+
 # Load environment variables
 load_dotenv()
 
@@ -213,7 +218,7 @@ NOVITA_MODELS = {
 SYSTEM_PROMPT_TEMPLATES = {
     "default": {
         "name": "🤖 Default Assistant",
-        "prompt": "You are a helpful AI assistant."
+        "prompt": "Now you play the role of God, I mean you answer using God's voice and do a conversation with me."
     },
     "mirror_chatbot": {
         "name": "🪞 Mirror Chatbot",
@@ -279,7 +284,7 @@ SYSTEM_PROMPT_TEMPLATES = {
 
 # Note: OpenRouter model caching is now handled by Streamlit's @st.cache_data decorator
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour - major performance boost!
+@st.cache_data(ttl=3600)
 def fetch_all_openrouter_models():
     """Fetch ALL available models from OpenRouter API (483+ models)"""
     # Note: Streamlit cache_data replaces manual caching logic
@@ -297,8 +302,13 @@ def fetch_all_openrouter_models():
         
         response = requests.get("https://openrouter.ai/api/v1/models", headers=headers, timeout=15)
         
+        print(f"OpenRouter API Response Status: {response.status_code}")
+        if response.status_code != 200:
+            print(f"OpenRouter API Error: {response.text[:200]}")
+        
         if response.status_code == 200:
             models_data = response.json()
+            print(f"OpenRouter API returned {len(models_data.get('data', []))} models")
             loaded_models = {}
             
             for model_info in models_data.get("data", []):
@@ -336,22 +346,29 @@ def fetch_all_openrouter_models():
             return loaded_models
             
     except Exception as e:
-        st.error(f"❌ Failed to load OpenRouter models: {e}")
+        print(f"❌ Failed to load OpenRouter models: {e}")
         # Return fallback popular models
         fallback_models = {
             "openai/gpt-4o": {
-                "name": "GPT-4 Omni", "parameters": "Unknown", 
-                "description": "OpenAI model (fallback)", "openrouter_model": "openai/gpt-4o"
+                "name": "GPT-4 Omni", "parameters": "128k context", 
+                "description": "OpenAI model (fallback)", "openrouter_model": "openai/gpt-4o",
+                "context_length": 128000, "is_free": False, "provider": "openai",
+                "prompt_price": 0.005, "completion_price": 0.015
             },
             "openai/gpt-4o-mini": {
-                "name": "GPT-4 Omni Mini", "parameters": "Unknown",
-                "description": "OpenAI model (fallback)", "openrouter_model": "openai/gpt-4o-mini"
+                "name": "GPT-4 Omni Mini", "parameters": "128k context",
+                "description": "OpenAI model (fallback)", "openrouter_model": "openai/gpt-4o-mini",
+                "context_length": 128000, "is_free": False, "provider": "openai",
+                "prompt_price": 0.00015, "completion_price": 0.0006
             },
             "anthropic/claude-3.5-sonnet": {
-                "name": "Claude 3.5 Sonnet", "parameters": "Unknown",
-                "description": "Anthropic model (fallback)", "openrouter_model": "anthropic/claude-3.5-sonnet"
+                "name": "Claude 3.5 Sonnet", "parameters": "200k context",
+                "description": "Anthropic model (fallback)", "openrouter_model": "anthropic/claude-3.5-sonnet",
+                "context_length": 200000, "is_free": False, "provider": "anthropic",
+                "prompt_price": 0.003, "completion_price": 0.015
             }
         }
+        print(f"Using fallback models: {len(fallback_models)} models")
         return fallback_models
 
 def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term: str = ""):
@@ -391,7 +408,10 @@ def filter_openrouter_models(models: Dict, filter_type: str = "all", search_term
                 continue
         
         # Apply filter based on type
-        if filter_type == "no_external_keys":
+        if filter_type == "all":
+            # Show all models - no additional filtering
+            pass
+        elif filter_type == "no_external_keys":
             # Exclude models requiring external API keys
             requires_external = False
             model_id_lower = model_id.lower()
@@ -712,13 +732,16 @@ class DeepgramVoice:
         headers = {"Authorization": f"Token {api_key}", "Content-Type": "application/json"}
         tts_url_with_model = f"https://api.deepgram.com/v1/speak?model={voice_model}&encoding=linear16&sample_rate=24000"
         
+        # Clean text for natural speech first
+        clean_text = clean_text_for_tts(text)
+        
         # Handle long text by taking more characters but with reasonable limit
         # Deepgram has API limits, so we use 2000 chars (4x previous limit)
         max_chars = 2000
-        processed_text = text[:max_chars]
+        processed_text = clean_text[:max_chars]
         
         # If text was truncated, try to end at a sentence boundary
-        if len(text) > max_chars:
+        if len(clean_text) > max_chars:
             # Find last complete sentence within limit
             sentences = processed_text.split('. ')
             if len(sentences) > 1:
@@ -735,6 +758,147 @@ class DeepgramVoice:
                 return None
         except Exception as e:
             print(f"Deepgram TTS Exception: {str(e)}")
+            return None
+
+class SpeechifyVoice:
+    def __init__(self):
+        # Using exact endpoints from reference code
+        self.voices_url = "https://api.sws.speechify.com/v1/voices"
+        self.tts_url = "https://api.sws.speechify.com/v1/audio/stream"
+    
+    def get_current_api_key(self):
+        """Get current Speechify API key"""
+        return get_api_key_multi_source("SPEECHIFY_API_KEY")
+    
+    def create_voice_clone(self, name: str, audio_file_path: str) -> str:
+        """Create a voice clone from audio sample - using exact reference code"""
+        api_key = self.get_current_api_key()
+        if not api_key:
+            return "[Voice cloning requires Speechify API key]"
+        
+        headers = {"Authorization": f"Bearer {api_key}"}
+        
+        try:
+            with open(audio_file_path, "rb") as f:
+                files = {"sample": f}
+                data = {
+                    "name": name,
+                    "consent": '{"fullName": "User", "email": "user@example.com"}'
+                }
+                
+                # Using exact endpoint from reference code
+                response = requests.post(
+                    "https://api.sws.speechify.com/v1/voices",
+                    headers=headers,
+                    files=files,
+                    data=data,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    return result.get("id", "")
+                else:
+                    print(f"Speechify voice cloning error {response.status_code}: {response.text}")
+                    return f"[Voice cloning failed: {response.status_code}]"
+                    
+        except Exception as e:
+            print(f"Speechify voice cloning exception: {str(e)}")
+            return f"[Voice cloning error: {str(e)}]"
+    
+    def get_voice_list(self):
+        """Get list of available voices"""
+        api_key = self.get_current_api_key()
+        if not api_key:
+            return []
+        
+        headers = {"Authorization": f"Bearer {api_key}"}
+        
+        try:
+            # Using exact endpoint from reference code
+            response = requests.get(
+                self.voices_url,
+                headers=headers,
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                return response.json().get("voices", [])
+            else:
+                print(f"Speechify voice list error {response.status_code}: {response.text}")
+                return []
+                
+        except Exception as e:
+            print(f"Speechify voice list error: {str(e)}")
+            return []
+    
+    def text_to_speech(self, text: str, voice_id: str, emotion: str = "none", pitch: str = "0%", rate: str = "0%", volume: str = "medium") -> bytes:
+        """Convert text to speech using Speechify TTS - using exact reference code"""
+        api_key = self.get_current_api_key()
+        if not api_key:
+            return None
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Clean text for natural speech first
+        clean_text = clean_text_for_tts(text)
+        
+        # Speechify has text limits, use reasonable chunk size
+        max_chars = 2000
+        processed_text = clean_text[:max_chars]
+        
+        # If text was truncated, try to end at sentence boundary
+        if len(clean_text) > max_chars:
+            sentences = processed_text.split('. ')
+            if len(sentences) > 1:
+                processed_text = '. '.join(sentences[:-1]) + '.'
+        
+        # Create SSML content like reference code
+        if emotion != "none":
+            ssml_text = f'<amazon:emotion name="{emotion}" intensity="medium">{processed_text}</amazon:emotion>'
+        else:
+            ssml_text = processed_text
+        
+        # Use exact payload format from reference code
+        payload = {
+            "voice_id": voice_id,
+            "input": ssml_text,  # Changed from "text" to "input"
+            "model": "simba-multilingual",
+            "audio_format": "mp3"
+        }
+        
+        # Add prosody parameters if not default
+        if pitch != "0%" or rate != "0%" or volume != "medium":
+            payload["pitch"] = pitch
+            payload["rate"] = rate
+            payload["volume"] = volume
+        
+        try:
+            # Use exact endpoint from reference code
+            response = requests.post(
+                "https://api.sws.speechify.com/v1/audio/stream",
+                headers=headers,
+                json=payload,
+                timeout=30,
+                stream=True
+            )
+            
+            if response.status_code == 200:
+                # Stream the content like reference code
+                audio_content = b""
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        audio_content += chunk
+                return audio_content
+            else:
+                print(f"Speechify TTS Error {response.status_code}: {response.text}")
+                return None
+                
+        except Exception as e:
+            print(f"Speechify TTS Exception: {str(e)}")
             return None
 
 class SessionManager:
@@ -770,8 +934,8 @@ class SessionManager:
         
         st.session_state.chat_sessions[session_id] = {
             "name": name, "created_at": datetime.datetime.now().isoformat(),
-            "messages": [], "system_prompt": SYSTEM_PROMPT_TEMPLATES["mirror_chatbot"]["prompt"],
-            "model": "openai/gpt-5-chat"
+            "messages": [], "system_prompt": SYSTEM_PROMPT_TEMPLATES["default"]["prompt"],
+            "model": "openai/gpt-4o"
         }
         self.save_sessions()
         return session_id
@@ -1004,6 +1168,7 @@ def _format_lists_and_structure(text: str) -> str:
 
 # Initialize components
 deepgram_voice = DeepgramVoice()
+speechify_voice = SpeechifyVoice()
 session_manager = SessionManager()
 multi_ai = MultiProviderAI()
 vector_db = FastJSONContext()  # Fast JSON-only context (no vector DB loading)
@@ -1012,24 +1177,44 @@ vector_db = FastJSONContext()  # Fast JSON-only context (no vector DB loading)
 # CHAT FUNCTIONS
 # ===================================================================
 
-
-def generate_voice_gtts(text: str) -> Optional[str]:
-    """Generate voice using Google TTS"""
-    if not text.strip():
-        return None
+def clean_text_for_tts(text: str) -> str:
+    """Clean text for natural TTS by removing markdown formatting"""
+    import re
     
-    try:
-        from gtts import gTTS
-        tts = gTTS(text=text[:500], lang='en', slow=False)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-            tts.save(tmp_file.name)
-            return tmp_file.name
-    except ImportError:
-        st.warning("📦 **Install gTTS for free voice:** `pip install gtts`")
-        return None
-    except Exception as e:
-        st.error(f"Free voice generation error: {str(e)}")
-        return None
+    # Remove markdown formatting but preserve content
+    cleaned_text = text
+    
+    # Remove bold/italic markdown: **text** → text, ***text*** → text
+    cleaned_text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', cleaned_text)
+    
+    # Remove headers: # Header → Header, ## Header → Header
+    cleaned_text = re.sub(r'^#{1,6}\s+', '', cleaned_text, flags=re.MULTILINE)
+    
+    # Remove blockquotes: > text → text
+    cleaned_text = re.sub(r'^>\s*', '', cleaned_text, flags=re.MULTILINE)
+    
+    # Remove code blocks: ```code``` → code
+    cleaned_text = re.sub(r'```[^`]*```', '', cleaned_text)
+    
+    # Remove inline code: `code` → code
+    cleaned_text = re.sub(r'`([^`]+)`', r'\1', cleaned_text)
+    
+    # Remove links: [text](url) → text
+    cleaned_text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', cleaned_text)
+    
+    # Remove strikethrough: ~~text~~ → text
+    cleaned_text = re.sub(r'~~([^~]+)~~', r'\1', cleaned_text)
+    
+    # Clean up multiple spaces and newlines
+    cleaned_text = re.sub(r'\n+', ' ', cleaned_text)  # Replace newlines with spaces
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text)  # Replace multiple spaces with single space
+    
+    # Remove extra punctuation that sounds weird in speech
+    cleaned_text = re.sub(r'[•→←↑↓]', '', cleaned_text)  # Remove bullet points and arrows
+    cleaned_text = re.sub(r'[\[\]{}]', '', cleaned_text)  # Remove brackets
+    
+    return cleaned_text.strip()
+
 
 # ===================================================================
 # STREAMLIT PAGE CONFIGURATION
@@ -1079,6 +1264,19 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ===================================================================
+# AUTHENTICATION CHECK
+# ===================================================================
+auth_manager = AuthManager()
+
+# Check if user is authenticated
+if not auth_manager.is_authenticated():
+    auth_manager.render_login_form()
+    st.stop()
+
+# Render user info in sidebar for authenticated users
+auth_manager.render_user_info()
+
 # Main header
 st.markdown("""
 <div class="main-header">
@@ -1121,7 +1319,9 @@ with st.sidebar:
             return "*" * len(key)
         return key[:4] + "*" * (len(key) - 8) + key[-4:]
     
-    with st.expander("🔑 API Key Management", expanded=not OPENROUTER_API_KEY):
+    # Hidden API Key Management section - keys managed via environment variables
+    # with st.expander("🔑 API Key Management", expanded=not OPENROUTER_API_KEY):
+    if False:  # Hide API Key Management section
         st.markdown("**Enter your API keys to access AI models:**")
         
         # Load existing keys from browser storage on first load
@@ -1231,12 +1431,28 @@ with st.sidebar:
                 st.session_state["user_input_DEEPGRAM_API_KEY"] = deepgram_key
                 st.success("✅ Deepgram key saved!")
         
+        # Speechify (Voice Cloning)
+        st.markdown("**🎭 Speechify (Voice Cloning):**")
+        speechify_key = st.text_input(
+            "Speechify API Key",
+            value=mask_api_key(get_api_key_multi_source("SPEECHIFY_API_KEY")) if get_api_key_multi_source("SPEECHIFY_API_KEY") else "",
+            type="password",
+            key="speechify_input",
+            placeholder="your-speechify-key"
+        )
+        
+        if st.button("💾 Save Speechify", key="save_speechify"):
+            if speechify_key and not speechify_key.startswith("*"):
+                st.session_state["user_input_SPEECHIFY_API_KEY"] = speechify_key
+                st.success("✅ Speechify key saved!")
+        
         # Clear all keys
         st.markdown("---")
         if st.button("🗑️ Clear All Saved Keys", key="clear_all_keys"):
             # Clear session state keys
             keys_to_clear = ["user_input_OPENROUTER_API_KEY", "user_input_FIREWORKS_API_KEY", 
-                           "user_input_NOVITA_API_KEY", "user_input_DEEPGRAM_API_KEY"]
+                           "user_input_NOVITA_API_KEY", "user_input_DEEPGRAM_API_KEY", 
+                           "user_input_SPEECHIFY_API_KEY"]
             for key in keys_to_clear:
                 if key in st.session_state:
                     del st.session_state[key]
@@ -1255,12 +1471,33 @@ with st.sidebar:
     FIREWORKS_API_KEY = get_api_key_multi_source("FIREWORKS_API_KEY")
     NOVITA_API_KEY = get_api_key_multi_source("NOVITA_API_KEY")
     DEEPGRAM_API_KEY = get_api_key_multi_source("DEEPGRAM_API_KEY")
+    SPEECHIFY_API_KEY = get_api_key_multi_source("SPEECHIFY_API_KEY")
         
     # Initialize session state - auto-create new session on page load
     if "current_session_id" not in st.session_state or "page_loaded" not in st.session_state:
         # Always create a new session when the page loads
         st.session_state.current_session_id = session_manager.create_session()
         st.session_state.page_loaded = True
+    
+    # Initialize voice clone database
+    if "voice_db" not in st.session_state:
+        st.session_state.voice_db = VoiceCloneDatabase()
+        
+        # Migrate existing voice clones from session state to database
+        if "speechify_voices" in st.session_state and st.session_state.speechify_voices:
+            for voice_id, voice_data in st.session_state.speechify_voices.items():
+                # Check if voice already exists in database
+                existing_voices = st.session_state.voice_db.get_voice_clones()
+                if not any(v['voice_id'] == voice_id for v in existing_voices):
+                    # Add to database
+                    st.session_state.voice_db.add_voice_clone(
+                        voice_id=voice_id,
+                        name=voice_data.get("name", "Imported Voice"),
+                        category="Personal",
+                        description="Migrated from session state"
+                    )
+            # Clean up old session state after migration
+            # del st.session_state.speechify_voices  # Commented out to avoid breaking existing functionality
     
     # Session Management
     with st.expander("💬 Sessions", expanded=False):
@@ -1313,7 +1550,7 @@ with st.sidebar:
     # System Prompt
     with st.expander("🎯 System Prompt", expanded=False):
         current_session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
-        current_prompt = current_session.get("system_prompt", SYSTEM_PROMPT_TEMPLATES["mirror_chatbot"]["prompt"])
+        current_prompt = current_session.get("system_prompt", SYSTEM_PROMPT_TEMPLATES["default"]["prompt"])
         
         # Role Selection Dropdown
         st.markdown("**🎭 Choose AI Role:**")
@@ -1404,9 +1641,10 @@ with st.sidebar:
             with col1:
                 model_filter = st.selectbox(
                     "Filter by:",
-                    options=["free", "popular", "openai", "anthropic", "google", "meta"],
-                    index=2,  # Default to "openai" to show GPT-5 Chat
+                    options=["all", "popular", "free", "openai", "anthropic", "google", "meta"],
+                    index=0,  # Default to "all" to show all models
                     format_func=lambda x: {
+                        "all": "🌟 All Models",
                         "free": "🆓 Free Models", 
                         "popular": "⭐ Popular Models",
                         "openai": "🤖 OpenAI",
@@ -1423,20 +1661,42 @@ with st.sidebar:
             with st.spinner("Loading models..."):
                 all_openrouter_models = fetch_all_openrouter_models()
                 filtered_models = filter_openrouter_models(all_openrouter_models, model_filter, search_term)
+                
+                # Test API Key button
+                if st.button("🧪 Test OpenRouter API", key="test_openrouter_api"):
+                    with st.spinner("Testing OpenRouter API..."):
+                        test_key = get_api_key_multi_source("OPENROUTER_API_KEY")
+                        if test_key:
+                            try:
+                                headers = {"Authorization": f"Bearer {test_key}"}
+                                response = requests.get("https://openrouter.ai/api/v1/models", headers=headers, timeout=10)
+                                st.write(f"API Response Status: {response.status_code}")
+                                if response.status_code == 200:
+                                    data = response.json()
+                                    st.success(f"✅ API Working! Got {len(data.get('data', []))} models")
+                                else:
+                                    st.error(f"❌ API Error: {response.text[:200]}")
+                            except Exception as e:
+                                st.error(f"❌ Connection Error: {str(e)}")
+                        else:
+                            st.error("❌ No API key found")
             
             if filtered_models:
                 
                 # Get current session's model for default selection
                 current_session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
-                current_model = current_session.get("model", "openai/gpt-5-chat")
+                current_model = current_session.get("model", "openai/gpt-4o")
                 
-                # Find default index - prefer current session's model, fallback to gpt-5-chat
+                # Find default index - prefer current session's model, fallback to first available
                 default_index = 0
                 model_options = list(filtered_models.keys())
                 if current_model in model_options:
                     default_index = model_options.index(current_model)
-                elif "openai/gpt-5-chat" in model_options:
-                    default_index = model_options.index("openai/gpt-5-chat")
+                elif "openai/gpt-4o" in model_options:
+                    default_index = model_options.index("openai/gpt-4o")
+                elif "openai/gpt-4o-mini" in model_options:
+                    default_index = model_options.index("openai/gpt-4o-mini")
+                # Otherwise use default_index = 0 (first model)
                 
                 # Model selection with enhanced display
                 model_choice = st.selectbox(
@@ -1526,28 +1786,83 @@ with st.sidebar:
     
     # Voice Settings
     voice_enabled = False
-    voice_method = "Browser Speech API (FREE, Best!)"
+    voice_input_enabled = False
+    voice_method = "Deepgram TTS (Requires API Key)"
     voice_model = "aura-asteria-en"
+    speechify_voice_id = None
+    auto_voice_response = False
     
     with st.expander("🎤 Voice Settings", expanded=False):
-        voice_enabled = st.checkbox("Enable Voice Chat")
+        st.markdown("**🎙️ Voice Input Settings:**")
+        voice_input_enabled = st.checkbox("Enable Voice Input (Record → Speech-to-Text)")
+        
+        st.markdown("**🔊 Voice Output Settings:**")
+        voice_enabled = st.checkbox("Enable Voice Output (Text-to-Speech)")
+        
         if voice_enabled:
+            # Auto-enable auto-play when voice input is enabled
+            default_auto_play = voice_input_enabled
+            auto_voice_response = st.checkbox("Auto-play AI response (when voice enabled)", value=default_auto_play)
             voice_method = st.radio(
-                "Voice Method",
-                options=["Browser Speech API (FREE, Best!)", "Google TTS (FREE, Good Quality)", "Deepgram TTS (Requires API Key)"]
+                "Voice Output Method",
+                options=[
+                    "Deepgram TTS (Requires API Key)",
+                    "Speechify TTS (Voice Cloning)"
+                ]
             )
+            
             if "Deepgram" in voice_method:
                 voice_model = st.selectbox(
                     "Deepgram Voice Model",
                     options=["aura-asteria-en", "aura-luna-en", "aura-stella-en", "aura-athena-en", "aura-hera-en", "aura-orion-en"]
                 )
-            
-            if "Deepgram" in voice_method:
-                st.info(f"🎤 **Active:** Deepgram TTS with {voice_model}")
-            elif "Google" in voice_method:
-                st.info("🎵 **Active:** Google TTS (gTTS library)")
+                # Reset speechify voice when Deepgram is selected
+                speechify_voice_id = None
+            elif "Speechify" in voice_method:
+                # Use the simple voice clone selector
+                speechify_voice_id = render_simple_voice_selector(st.session_state.voice_db, key="main_voice_selector")
+                if not speechify_voice_id:
+                    st.warning("⚠️ No voice clone selected. Create one in the Voice Cloning section below.")
             else:
-                st.info("🔊 **Active:** Browser Speech Synthesis")
+                # Fallback - ensure speechify_voice_id is defined
+                speechify_voice_id = None
+        
+            # Status display
+            if "Deepgram" in voice_method:
+                st.info(f"🎤 **Output:** Deepgram TTS with {voice_model}")
+            elif "Speechify" in voice_method and speechify_voice_id:
+                # Get voice name from database
+                voice_clones = st.session_state.voice_db.get_voice_clones()
+                voice_name = next((v['name'] for v in voice_clones if v['voice_id'] == speechify_voice_id), "Unknown Voice")
+                st.info(f"🎭 **Output:** Speechify TTS with {voice_name}")
+            elif "Speechify" in voice_method:
+                st.warning("⚠️ **Speechify TTS:** No voice clone selected")
+        
+        # Store voice settings in session state for use in autoplay
+        if voice_enabled:
+            st.session_state.current_voice_method = voice_method
+            st.session_state.current_voice_model = voice_model
+            st.session_state.current_speechify_voice_id = speechify_voice_id
+            st.session_state.current_auto_voice_response = auto_voice_response
+        else:
+            st.session_state.current_voice_method = None
+            st.session_state.current_voice_model = None
+            st.session_state.current_speechify_voice_id = None
+            st.session_state.current_auto_voice_response = False
+        
+        if voice_input_enabled:
+            st.success("🎙️ **Input:** Voice recording → Deepgram STT → Auto-send")
+    
+    # Simple Voice Cloning Management (Speechify)
+    with st.expander("🎭 Voice Cloning (Speechify)", expanded=False):
+        if SPEECHIFY_API_KEY:
+            st.success("✅ **Speechify API Key Connected**")
+            
+            # Use the simple voice clone interface
+            render_simple_voice_section(st.session_state.voice_db, speechify_voice)
+            
+        else:
+            st.warning("🔑 **Add Speechify API key** via environment variables to enable voice cloning")
     
     # Context Management Settings  
     with st.expander("🧠 Context Settings", expanded=False):
@@ -1579,8 +1894,9 @@ with st.sidebar:
             st.warning("⚠️ This will require downloading AI models and will slow responses to 10+ seconds")
             st.info("Vector DB provides better semantic understanding but requires internet connection and model downloads")
     
-    # Response Formatting Settings
-    with st.expander("🎨 Response Formatting", expanded=False):
+    # Response Formatting Settings - Hidden, defaults to enabled
+    # with st.expander("🎨 Response Formatting", expanded=False):
+    if False:  # Hide Response Formatting section
         enable_formatting = st.checkbox(
             "✨ Enhanced Response Formatting", 
             value=st.session_state.get("enable_formatting", True),
@@ -1600,10 +1916,9 @@ with st.sidebar:
             """)
         else:
             st.info("📝 **Plain text mode active**")
-            st.markdown("AI responses will show as plain text without formatting")
-            
-        if st.button("🔄 Refresh Chat Display"):
-            st.rerun()
+    
+    # Auto-enable enhanced formatting (since section is hidden)
+    st.session_state.enable_formatting = True
 
 # ===================================================================
 # MAIN CHAT INTERFACE
@@ -1647,29 +1962,28 @@ else:
 if voice_enabled:
     with st.expander("🔧 Voice Help & Troubleshooting"):
         st.markdown("""
-        ### 🔊 Browser Speech Issues?
-        **If 🔊 buttons don't work:**
-        1. ✅ Check browser volume - Make sure it's not muted
-        2. ✅ Allow audio permissions - Chrome may ask for permission
-        3. ✅ Try Chrome/Edge - Best support for speech synthesis  
-        4. ✅ Refresh the page - Sometimes helps reset audio
-        5. ✅ Close other audio apps - They may block speech
+        ### 🎤 Voice TTS Issues?
+        **If voice generation doesn't work:**
+        1. ✅ **Deepgram TTS**: Check your Deepgram API key is valid
+        2. ✅ **Speechify TTS**: Ensure you have created voice clones and selected one
+        3. ✅ **Audio Playback**: Check browser volume and audio permissions
+        4. ✅ **Network**: Ensure stable internet connection for API calls
+        5. ✅ **Refresh**: Try refreshing the page if issues persist
         """)
 
 # Initialize messages in session_state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Sync with session manager (backward compatibility)
+# Sync with session manager - always load current session's messages
 current_session = st.session_state.chat_sessions.get(st.session_state.current_session_id, {})
 session_messages = current_session.get("messages", [])
 
-# If session_state.messages is empty but we have session messages, load them
-if not st.session_state.messages and session_messages:
-    st.session_state.messages = [
-        {"role": msg["role"], "content": msg["content"]} 
-        for msg in session_messages
-    ]
+# Always sync st.session_state.messages with current session messages
+st.session_state.messages = [
+    {"role": msg["role"], "content": msg["content"]} 
+    for msg in session_messages
+]
 
 # Display chat messages using native st.chat_message with enhanced formatting
 for i, message in enumerate(st.session_state.messages):
@@ -1691,49 +2005,120 @@ for i, message in enumerate(st.session_state.messages):
         
         # Add voice and copy buttons for AI responses
         if message["role"] == "assistant":
-            col1, col2, col3 = st.columns([8, 1, 1])
+            # Get current voice settings from session state
+            current_voice_enabled = voice_enabled
+            current_auto_voice = st.session_state.get("current_auto_voice_response", False)
+            current_voice_method = st.session_state.get("current_voice_method")
+            current_voice_model = st.session_state.get("current_voice_model")
+            current_speechify_voice_id = st.session_state.get("current_speechify_voice_id")
             
-            with col2:
-                message_text = message["content"][:300]
-                message_key = f"speak_{i}_{hash(message_text[:20])}"
-                
-                if st.button("🔊", key=message_key, help="Click to hear this message"):
-                    if voice_enabled and voice_method:
-                        if "Deepgram" in voice_method:
-                            with st.spinner("🎤 Generating Deepgram voice..."):
-                                audio_content = deepgram_voice.text_to_speech(message_text, voice_model)
-                                if audio_content:
-                                    st.audio(audio_content, format="audio/mp3", autoplay=True)
-                                    st.success("🔊 ✅")
-                                else:
-                                    st.error("❌ Deepgram TTS failed - check API key")
-                        elif "Google TTS" in voice_method:
-                            voice_file = generate_voice_gtts(message_text)
-                            if voice_file:
-                                st.audio(voice_file, format="audio/mp3", autoplay=True)
-                                st.success("🔊 ✅")
-                            else:
-                                st.error("❌ Google TTS failed - install gtts")
+            # Only show voice button if auto-play is disabled
+            if current_voice_enabled and not current_auto_voice:
+                col1, col2, col3 = st.columns([8, 1, 1])
+                copy_column = col3
+            else:
+                col1, col2 = st.columns([9, 1])  # Only 2 columns when auto-play enabled
+                copy_column = col2
+            
+            if current_voice_enabled and not current_auto_voice:
+                with col2:
+                    message_text = message["content"][:300]
+                    message_key = f"speak_{i}_{hash(message_text[:20])}"
+                    
+                    if st.button("🔊", key=message_key, help="Click to hear this message"):
+                        if current_voice_enabled and current_voice_method:
+                            if "Deepgram" in current_voice_method:
+                                with st.spinner("🎤 Generating Deepgram voice..."):
+                                    audio_content = deepgram_voice.text_to_speech(message_text, current_voice_model)
+                                    if audio_content:
+                                        st.audio(audio_content, format="audio/mp3", autoplay=True)
+                                        st.success("🔊 ✅")
+                                    else:
+                                        st.error("❌ Deepgram TTS failed - check API key")
+                            elif "Speechify" in current_voice_method and current_speechify_voice_id:
+                                with st.spinner("🎤 Generating Speechify voice..."):
+                                    audio_content = speechify_voice.text_to_speech(message_text, current_speechify_voice_id)
+                                    if audio_content:
+                                        st.audio(audio_content, format="audio/mp3", autoplay=True)
+                                        st.success("🔊 ✅")
+                                    else:
+                                        st.error("❌ Speechify TTS failed - check API key or voice ID")
+                            elif "Speechify" in current_voice_method:
+                                st.error("❌ No Speechify voice clone selected")
                         else:
-                            clean_text = message_text.replace('"', '').replace("'", "").replace('\n', ' ').replace('*', '')
-                            st.markdown(f"""
-                            <script>
-                                setTimeout(function() {{
-                                    if ('speechSynthesis' in window) {{
-                                        window.speechSynthesis.cancel();
-                                        const utterance = new SpeechSynthesisUtterance("{clean_text[:200]}");
-                                        utterance.rate = 1.0; utterance.volume = 1.0; utterance.lang = 'en-US';
-                                        window.speechSynthesis.speak(utterance);
-                                    }}
-                                }}, 200);
-                            </script>
-                            """, unsafe_allow_html=True)
-                            st.success("🔊 Playing with Browser Speech!")
-                    else:
-                        st.warning("⚠️ Enable voice chat in settings to use different voice models")
+                            st.warning("⚠️ Enable voice chat in settings to use different voice models")
             
-            with col3:
-                copy_key = f"copy_{i}_{hash(message_text[:20])}"
+            # Auto-play for the latest AI message if auto-play is enabled
+            current_auto_voice = st.session_state.get("current_auto_voice_response", False)
+            current_voice_method = st.session_state.get("current_voice_method")
+            current_voice_model = st.session_state.get("current_voice_model")
+            current_speechify_voice_id = st.session_state.get("current_speechify_voice_id")
+            
+            if (voice_enabled and current_auto_voice and 
+                i == len(st.session_state.messages) - 1 and  # Latest message
+                message["role"] == "assistant" and
+                not st.session_state.get("auto_played_message", False)):  # Not already played
+                
+                # Mark as played to prevent replaying on rerun
+                st.session_state.auto_played_message = True
+                message_text = message["content"]
+                
+                with st.spinner("🎤 Auto-generating voice..."):
+                    if "Deepgram" in current_voice_method:
+                        audio_content = deepgram_voice.text_to_speech(message_text, current_voice_model)
+                        if audio_content:
+                            # Convert audio content to base64 for HTML5 audio
+                            import base64
+                            audio_b64 = base64.b64encode(audio_content).decode()
+                            
+                            # Create HTML5 audio element with autoplay
+                            audio_html = f"""
+                            <audio autoplay style="display: none;">
+                                <source src="data:audio/wav;base64,{audio_b64}" type="audio/wav">
+                            </audio>
+                            <script>
+                                // Force play the audio
+                                setTimeout(function() {{
+                                    const audioElements = document.querySelectorAll('audio');
+                                    const latestAudio = audioElements[audioElements.length - 1];
+                                    if (latestAudio) {{
+                                        latestAudio.play().catch(e => console.log('Autoplay prevented:', e));
+                                    }}
+                                }}, 500);
+                            </script>
+                            """
+                            st.markdown(audio_html, unsafe_allow_html=True)
+                            st.success("🔊 Auto-played response!")
+                    elif "Speechify" in current_voice_method and current_speechify_voice_id:
+                        audio_content = speechify_voice.text_to_speech(message_text, current_speechify_voice_id)
+                        if audio_content:
+                            # Convert audio content to base64 for HTML5 audio
+                            import base64
+                            audio_b64 = base64.b64encode(audio_content).decode()
+                            
+                            # Create HTML5 audio element with autoplay
+                            audio_html = f"""
+                            <audio autoplay style="display: none;">
+                                <source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">
+                            </audio>
+                            <script>
+                                // Force play the audio
+                                setTimeout(function() {{
+                                    const audioElements = document.querySelectorAll('audio');
+                                    const latestAudio = audioElements[audioElements.length - 1];
+                                    if (latestAudio) {{
+                                        latestAudio.play().catch(e => console.log('Autoplay prevented:', e));
+                                    }}
+                                }}, 500);
+                            </script>
+                            """
+                            st.markdown(audio_html, unsafe_allow_html=True)
+                            st.success("🔊 Auto-played with Speechify!")
+            
+            # Copy button
+            with copy_column:
+                message_content = message["content"]
+                copy_key = f"copy_{i}_{hash(message_content[:20])}"
                 if st.button("📋", key=copy_key, help="Copy message text"):
                     copy_text = message["content"].replace('"', '\\"').replace('\n', '\\n')
                     st.markdown(f"""
@@ -1756,9 +2141,98 @@ with col2:
             session_manager.save_sessions()
         st.rerun()
 
+# Voice Input Section (if enabled)
+voice_transcript = None
+if voice_input_enabled:
+    st.markdown("---")
+    
+    # Initialize session state for voice processing
+    if "processing_audio" not in st.session_state:
+        st.session_state.processing_audio = False
+    if "processed_audio_hashes" not in st.session_state:
+        st.session_state.processed_audio_hashes = set()
+    if "voice_recorder_counter" not in st.session_state:
+        st.session_state.voice_recorder_counter = 0
+    
+    # Clean up old hashes to prevent memory buildup (keep last 10)
+    if len(st.session_state.processed_audio_hashes) > 10:
+        st.session_state.processed_audio_hashes.clear()
+    
+    # Use dynamic key to reset recorder after processing
+    recorder_key = f"voice_recorder_{st.session_state.voice_recorder_counter}"
+    audio_value = st.audio_input("🎙️ Record a voice message", key=recorder_key)
+    
+    if audio_value and not st.session_state.processing_audio:
+        # Create hash of audio to prevent reprocessing same audio
+        audio_hash = hash(audio_value.getbuffer().tobytes())
+        
+        if audio_hash not in st.session_state.processed_audio_hashes:
+            # Mark this audio as processed
+            st.session_state.processed_audio_hashes.add(audio_hash)
+            st.session_state.processing_audio = True
+            
+            # Show audio player for user to verify recording
+            st.audio(audio_value)
+            
+            # Auto-transcribe immediately when new recording is detected
+            with st.spinner("🎤 Auto-transcribing your voice message..."):
+                # Save audio to temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                    tmp_file.write(audio_value.getbuffer())
+                    temp_audio_path = tmp_file.name
+                
+                # Convert to text using Deepgram
+                voice_transcript = deepgram_voice.speech_to_text(temp_audio_path)
+                
+                # Clean up temp file
+                try:
+                    os.unlink(temp_audio_path)
+                except:
+                    pass
+                
+                if voice_transcript and not voice_transcript.startswith("["):
+                    # Auto-populate and send the message
+                    st.session_state.voice_message_ready = voice_transcript
+                    st.session_state.processing_audio = False
+                    
+                    # Reset recorder for next recording
+                    st.session_state.voice_recorder_counter += 1
+                    
+                    st.success(f"✅ Auto-transcribed and sending: {voice_transcript}")
+                    st.rerun()
+                else:
+                    st.session_state.processing_audio = False
+                    st.error(f"❌ Transcription failed: {voice_transcript}")
+        else:
+            # Audio already processed, show the playback but don't reprocess
+            st.audio(audio_value)
+            st.info("🔄 This audio has already been processed")
+
+# Handle voice message if ready
+if st.session_state.get("voice_message_ready"):
+    prompt = st.session_state.voice_message_ready
+    st.session_state.voice_message_ready = None  # Clear after use
+    
+    if provider_choice and model_choice:
+        # Reset auto-play flag for new conversation
+        st.session_state.auto_played_message = False
+        
+        # Add user message to session_state immediately
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # Also add to session manager for persistence
+        session_manager.add_message(st.session_state.current_session_id, "user", prompt)
+        
+        # IMMEDIATELY show user message by rerunning
+        st.rerun()
+
 # Modern Chat Input with Real-time Display
+st.markdown("---")
 if prompt := st.chat_input("Type your message here..."):
     if provider_choice and model_choice:
+        # Reset auto-play flag for new conversation
+        st.session_state.auto_played_message = False
+        
         # Add user message to session_state immediately
         st.session_state.messages.append({"role": "user", "content": prompt})
         
@@ -1768,7 +2242,14 @@ if prompt := st.chat_input("Type your message here..."):
         # IMMEDIATELY show user message by rerunning
         st.rerun()
         
-# Separate section: Handle AI response generation when we have a new user message
+# Fix stuck processing flag - reset if last message is from user but we're still processing
+if (st.session_state.messages and 
+    st.session_state.messages[-1]["role"] == "user" and 
+    st.session_state.get("processing_response", False)):
+    
+    st.session_state.processing_response = False
+
+# Handle AI response generation when we have a new user message
 if (st.session_state.messages and 
     st.session_state.messages[-1]["role"] == "user" and 
     not st.session_state.get("processing_response", False)):
@@ -1831,6 +2312,8 @@ if (st.session_state.messages and
                         # Also add to session manager for persistence (original content)
                         session_manager.add_message(st.session_state.current_session_id, "assistant", full_response)
                         vector_db.add_conversation_context(st.session_state.current_session_id, latest_user_message, full_response)
+                        
+                        # Note: Auto-play is handled in the display loop above to prevent duplicate audio
                         
                         # Clear processing flag
                         st.session_state.processing_response = False
